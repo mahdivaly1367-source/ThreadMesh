@@ -150,6 +150,9 @@ class ThreadMeshViewModel(
             )
             result.onSuccess { event ->
                 _userMessage.value = "موضوع اصلی با موفقیت ذخیره شد."
+                if (event.publishScope == PublishScope.MESH_PUBLIC) {
+                    viewModelScope.launch { flushPendingToConnectedPeers() }
+                }
                 onSuccess(event.id)
             }.onFailure { err ->
                 _userMessage.value = err.message ?: "خطا در ثبت موضوع"
@@ -166,8 +169,11 @@ class ThreadMeshViewModel(
                 text = text,
                 scope = scope
             )
-            result.onSuccess {
+            result.onSuccess { event ->
                 _userMessage.value = "پاسخ با موفقیت به ساختار گفتگو پیوست شد."
+                if (event.publishScope == PublishScope.MESH_PUBLIC) {
+                    viewModelScope.launch { flushPendingToConnectedPeers() }
+                }
                 onSuccess()
             }.onFailure { err ->
                 _userMessage.value = err.message ?: "خطا در ثبت پاسخ"
@@ -184,12 +190,30 @@ class ThreadMeshViewModel(
                 explanationText = explanation,
                 scope = scope
             )
-            result.onSuccess {
+            result.onSuccess { event ->
                 _userMessage.value = "تغییر دیدگاه بدون بازنویسی پست اصلی ثبت شد."
+                if (event.publishScope == PublishScope.MESH_PUBLIC) {
+                    viewModelScope.launch { flushPendingToConnectedPeers() }
+                }
                 onSuccess()
             }.onFailure { err ->
                 _userMessage.value = err.message ?: "خطا در ثبت تغییر دیدگاه"
             }
+        }
+    }
+
+    /**
+     * Newly created public mesh posts are already persisted in the Room outbox by the repository.
+     * If peers are connected now, flush the durable queue immediately instead of waiting for a
+     * later connection-state change or a manual sync button.
+     */
+    private suspend fun flushPendingToConnectedPeers() {
+        val router = meshRouter ?: return
+        val connectedPeers = transport?.peers?.value
+            ?.filter { it.status == PeerConnectionStatus.CONNECTED }
+            .orEmpty()
+        connectedPeers.forEach { peer ->
+            router.flushOutboxToPeer(peer.endpointId)
         }
     }
 
