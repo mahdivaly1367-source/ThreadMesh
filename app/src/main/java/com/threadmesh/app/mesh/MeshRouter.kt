@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 data class MeshRouterStats(
     val packetsReceived: Int = 0,
@@ -126,6 +127,13 @@ class MeshRouter(
      * Dispatches an incoming raw string payload (ACK or RELAY packet).
      */
     suspend fun handleIncomingPayload(rawJson: String, fromEndpointId: String = "") {
+        // Older app builds may send a raw EventEntity JSON object. The ViewModel's
+        // compatibility collector handles it; it is not a RelayPacket envelope.
+        val rawObject = runCatching { JSONObject(rawJson) }.getOrNull()
+        if (rawObject != null && !rawObject.has("packetId") && rawObject.has("eventType")) {
+            return
+        }
+
         // Check if this payload is an ACK
         val ack = AckPacket.fromJson(rawJson)
         if (ack != null) {

@@ -78,6 +78,7 @@ dependencies {
 
     // Unit Testing
     testImplementation(libs.junit)
+    testImplementation(libs.json)
     testImplementation(libs.kotlinx.coroutines.test)
 
     debugImplementation(libs.androidx.ui.tooling)

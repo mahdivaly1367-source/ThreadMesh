@@ -10,14 +10,13 @@ import com.threadmesh.app.data.repository.ThreadListItem
 import com.threadmesh.app.data.repository.ThreadMeshRepository
 import com.threadmesh.app.data.repository.TreeNode
 import com.threadmesh.app.mesh.MeshRouter
-import kotlinx.coroutines.flow.*
-import kotlinx.coroutines.launch
-import java.util.UUID
-
 import com.threadmesh.app.transport.DiscoveredPeer
 import com.threadmesh.app.transport.MeshServiceState
 import com.threadmesh.app.transport.PeerConnectionStatus
 import com.threadmesh.app.transport.TransportProvider
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+import java.util.UUID
 
 class ThreadMeshViewModel(
     private val repository: ThreadMeshRepository,
@@ -146,6 +145,7 @@ class ThreadMeshViewModel(
                 text = text,
                 scope = scope
             )
+            if (result.isSuccess) flushPendingMeshMessages()
             result.onSuccess { event ->
                 _userMessage.value = "موضوع اصلی با موفقیت ذخیره شد."
                 onSuccess(event.id)
@@ -164,6 +164,7 @@ class ThreadMeshViewModel(
                 text = text,
                 scope = scope
             )
+            if (result.isSuccess) flushPendingMeshMessages()
             result.onSuccess {
                 _userMessage.value = "پاسخ با موفقیت به ساختار گفتگو پیوست شد."
                 onSuccess()
@@ -182,6 +183,7 @@ class ThreadMeshViewModel(
                 explanationText = explanation,
                 scope = scope
             )
+            if (result.isSuccess) flushPendingMeshMessages()
             result.onSuccess {
                 _userMessage.value = "تغییر دیدگاه بدون بازنویسی پست اصلی ثبت شد."
                 onSuccess()
@@ -224,6 +226,20 @@ class ThreadMeshViewModel(
 
     fun rejectPeer(endpointId: String) {
         transport?.rejectConnection(endpointId)
+    }
+
+
+    /**
+     * Attempt to send queued public RelayPackets to peers that are already connected.
+     * The router keeps packets durable until expiry and tracks ACKs per connection.
+     */
+    private suspend fun flushPendingMeshMessages() {
+        val router = meshRouter ?: return
+        val connected = transport?.peers?.value.orEmpty()
+            .filter { it.status == PeerConnectionStatus.CONNECTED }
+        for (peer in connected) {
+            router.flushOutboxToPeer(peer.endpointId)
+        }
     }
 
     fun syncMeshEventsToPeer(endpointId: String) {
