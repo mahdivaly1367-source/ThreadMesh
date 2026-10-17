@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 data class MeshRouterStats(
     val packetsReceived: Int = 0,
@@ -131,6 +132,13 @@ class MeshRouter(
             return
         }
 
+        // Legacy direct EventEntity JSON is emitted through incomingEvents. Do not parse it
+        // again as a relay envelope or produce a misleading malformed-packet error.
+        val rawObject = runCatching { JSONObject(rawJson) }.getOrNull()
+        if (rawObject != null && !rawObject.has("packetId") && rawObject.has("eventType")) {
+            return
+        }
+
         // Otherwise process as RelayPacket
         processIncomingPacket(rawJson, fromEndpointId)
     }
@@ -140,7 +148,8 @@ class MeshRouter(
      */
     suspend fun handleIncomingAck(ack: AckPacket, fromEndpointId: String) {
         _stats.update { it.copy(acksReceived = it.acksReceived + 1) }
-        val peerIdentifier = if (ack.ackFromNodeId.isNotBlank()) ack.ackFromNodeId else fromEndpointId
+        // Outbox delivery deduplication uses Nearby endpoint IDs, not logical node IDs.
+        val peerIdentifier = if (fromEndpointId.isNotBlank()) fromEndpointId else ack.ackFromNodeId
         log("تأییدیه دریافت و ذخیره در گره مقصد (ACK) از $peerIdentifier برای بسته ${ack.packetId} دریافت شد (وضعیت: ${ack.status}).")
 
         // Record confirmed delivery for this specific peer without depriving other future peers!
@@ -208,7 +217,13 @@ class MeshRouter(
         } else {
             event
         }
-        eventDao.insertEvent(eventToInsert)
+        val insertResult = eventDao.insertEvent(eventToInsert)
+        if (insertResult <= 0L) {
+            // Another collector may have inserted this event after the initial existence check.
+            _stats.update { it.copy(packetsDroppedDuplicate = it.packetsDroppedDuplicate + 1) }
+            sendAck(fromEndpointId, packet.packetId, event.id, AckPacket.STATUS_DUPLICATE)
+            return Result.success(false)
+        }
         _stats.update { it.copy(packetsStoredLocally = it.packetsStoredLocally + 1) }
         log("پیام [${event.displayName}]: «${event.text.take(30)}...» با پرش ${packet.hopCount} در پایگاه محلی ذخیره شد.")
 

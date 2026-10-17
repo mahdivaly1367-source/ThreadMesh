@@ -5,6 +5,9 @@ import androidx.lifecycle.viewModelScope
 import com.threadmesh.app.data.model.EventEntity
 import com.threadmesh.app.data.model.EventType
 import com.threadmesh.app.data.model.PublishScope
+import com.threadmesh.app.data.local.OutboxDao
+import com.threadmesh.app.data.local.ThreadMeshDao
+import com.threadmesh.app.mesh.MeshRouter
 import com.threadmesh.app.data.repository.RecentChangeEventItem
 import com.threadmesh.app.data.repository.ThreadListItem
 import com.threadmesh.app.data.repository.ThreadMeshRepository
@@ -20,11 +23,29 @@ import com.threadmesh.app.transport.TransportProvider
 
 class ThreadMeshViewModel(
     private val repository: ThreadMeshRepository,
-    private val transport: TransportProvider? = null
+    private val transport: TransportProvider? = null,
+    threadMeshDao: ThreadMeshDao? = null,
+    outboxDao: OutboxDao? = null,
+    initialLocalAuthorId: String? = null
 ) : ViewModel() {
 
-    private val _localAuthorId = MutableStateFlow(UUID.randomUUID().toString().take(8))
+    private val _localAuthorId = MutableStateFlow(
+        initialLocalAuthorId?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString().take(8)
+    )
     val localAuthorId: StateFlow<String> = _localAuthorId.asStateFlow()
+
+    // The router belongs to the ViewModel lifecycle and shares the same stable identity as local posts.
+    private val meshRouter: MeshRouter? = if (threadMeshDao != null && outboxDao != null) {
+        MeshRouter(
+            localNodeId = _localAuthorId.value,
+            eventDao = threadMeshDao,
+            outboxDao = outboxDao,
+            transport = transport,
+            scope = viewModelScope
+        )
+    } else {
+        null
+    }
 
     private val _displayName = MutableStateFlow("کاربر محلی")
     val displayName: StateFlow<String> = _displayName.asStateFlow()
@@ -48,23 +69,7 @@ class ThreadMeshViewModel(
     val meshError: StateFlow<String?> = transport?.lastError
         ?: MutableStateFlow<String?>(null).asStateFlow()
 
-    init {
-        // Collect incoming mesh events from transport and persist in Room DB
-        if (transport != null) {
-            viewModelScope.launch {
-                transport.incomingEvents.collect { incomingEvent ->
-                    val result = repository.importIncomingMeshEvent(incomingEvent)
-                    result.onSuccess { isNew ->
-                        if (isNew) {
-                            _userMessage.value = "رویداد عمومی جدید (${incomingEvent.displayName}) از شبکه مش دریافت و ذخیره شد."
-                        }
-                    }.onFailure { err ->
-                        _userMessage.value = "رویداد نامعتبر از مش دریافت شد: ${err.message}"
-                    }
-                }
-            }
-        }
-    }
+    // MeshRouter owns incoming-event persistence and relay processing to avoid duplicate writes.
 
     // Threads overview flow
     val threadListItems: StateFlow<List<ThreadListItem>> = combine(
@@ -213,14 +218,8 @@ class ThreadMeshViewModel(
     }
 
     fun acceptPeer(endpointId: String) {
+        // Once the connection reaches CONNECTED, MeshRouter flushes the durable RelayPacket outbox.
         transport?.acceptConnection(endpointId)
-        viewModelScope.launch {
-            // Once accepted, synchronize our MESH_PUBLIC events to this peer
-            val publicEvents = repository.getMeshPublicEvents()
-            for (ev in publicEvents) {
-                transport?.sendMeshEvent(endpointId, ev)
-            }
-        }
     }
 
     fun rejectPeer(endpointId: String) {
@@ -229,13 +228,8 @@ class ThreadMeshViewModel(
 
     fun syncMeshEventsToPeer(endpointId: String) {
         viewModelScope.launch {
-            val publicEvents = repository.getMeshPublicEvents()
-            var count = 0
-            for (ev in publicEvents) {
-                val res = transport?.sendMeshEvent(endpointId, ev)
-                if (res?.isSuccess == true) count++
-            }
-            _userMessage.value = "$count رویداد MESH_PUBLIC با همتا همگام‌سازی شد."
+            val count = meshRouter?.flushOutboxToPeer(endpointId) ?: 0
+            _userMessage.value = "$count بستهٔ مش برای همتای انتخاب‌شده ارسال شد؛ تأیید ذخیرهٔ مقصد جداگانه دریافت می‌شود."
         }
     }
 }
