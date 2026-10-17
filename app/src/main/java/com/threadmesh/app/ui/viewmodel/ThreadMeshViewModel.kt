@@ -9,6 +9,7 @@ import com.threadmesh.app.data.repository.RecentChangeEventItem
 import com.threadmesh.app.data.repository.ThreadListItem
 import com.threadmesh.app.data.repository.ThreadMeshRepository
 import com.threadmesh.app.data.repository.TreeNode
+import com.threadmesh.app.mesh.MeshRouter
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -20,10 +21,12 @@ import com.threadmesh.app.transport.TransportProvider
 
 class ThreadMeshViewModel(
     private val repository: ThreadMeshRepository,
-    private val transport: TransportProvider? = null
+    private val transport: TransportProvider? = null,
+    private val meshRouter: MeshRouter? = null,
+    initialAuthorId: String = UUID.randomUUID().toString().take(8)
 ) : ViewModel() {
 
-    private val _localAuthorId = MutableStateFlow(UUID.randomUUID().toString().take(8))
+    private val _localAuthorId = MutableStateFlow(initialAuthorId)
     val localAuthorId: StateFlow<String> = _localAuthorId.asStateFlow()
 
     private val _displayName = MutableStateFlow("کاربر محلی")
@@ -213,14 +216,10 @@ class ThreadMeshViewModel(
     }
 
     fun acceptPeer(endpointId: String) {
+        // MeshRouter observes the CONNECTED transition and drains the durable RelayPacket outbox.
+        // Do not bypass the relay envelope with raw EventEntity payloads here.
         transport?.acceptConnection(endpointId)
-        viewModelScope.launch {
-            // Once accepted, synchronize our MESH_PUBLIC events to this peer
-            val publicEvents = repository.getMeshPublicEvents()
-            for (ev in publicEvents) {
-                transport?.sendMeshEvent(endpointId, ev)
-            }
-        }
+        _userMessage.value = "درخواست پذیرفته شد؛ پس از برقراری اتصال، صف پیام‌های مش ارسال می‌شود."
     }
 
     fun rejectPeer(endpointId: String) {
@@ -229,13 +228,17 @@ class ThreadMeshViewModel(
 
     fun syncMeshEventsToPeer(endpointId: String) {
         viewModelScope.launch {
-            val publicEvents = repository.getMeshPublicEvents()
-            var count = 0
-            for (ev in publicEvents) {
-                val res = transport?.sendMeshEvent(endpointId, ev)
-                if (res?.isSuccess == true) count++
+            val count = meshRouter?.flushOutboxToPeer(endpointId) ?: 0
+            _userMessage.value = if (meshRouter == null) {
+                "موتور انتقال مش در دسترس نیست."
+            } else {
+                "$count بستهٔ در انتظار انتقال برای این همتا ارسال شد."
             }
-            _userMessage.value = "$count رویداد MESH_PUBLIC با همتا همگام‌سازی شد."
         }
+    }
+
+    override fun onCleared() {
+        meshRouter?.close()
+        super.onCleared()
     }
 }

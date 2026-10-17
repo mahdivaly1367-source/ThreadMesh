@@ -12,6 +12,8 @@ import com.threadmesh.app.transport.PeerConnectionStatus
 import com.threadmesh.app.transport.TransportProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,7 +37,7 @@ class MeshRouter(
     private val eventDao: ThreadMeshDao,
     private val outboxDao: OutboxDao,
     private val transport: TransportProvider?,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 ) {
     private val _stats = MutableStateFlow(MeshRouterStats())
     val stats: StateFlow<MeshRouterStats> = _stats.asStateFlow()
@@ -140,7 +142,9 @@ class MeshRouter(
      */
     suspend fun handleIncomingAck(ack: AckPacket, fromEndpointId: String) {
         _stats.update { it.copy(acksReceived = it.acksReceived + 1) }
-        val peerIdentifier = if (ack.ackFromNodeId.isNotBlank()) ack.ackFromNodeId else fromEndpointId
+        // flushOutboxToPeer checks Nearby endpoint IDs; persist the same identifier here.
+        // Fall back to the stable node ID only for transports that don't supply an endpoint ID.
+        val peerIdentifier = fromEndpointId.ifBlank { ack.ackFromNodeId }
         log("تأییدیه دریافت و ذخیره در گره مقصد (ACK) از $peerIdentifier برای بسته ${ack.packetId} دریافت شد (وضعیت: ${ack.status}).")
 
         // Record confirmed delivery for this specific peer without depriving other future peers!
@@ -208,7 +212,13 @@ class MeshRouter(
         } else {
             event
         }
-        eventDao.insertEvent(eventToInsert)
+        val insertedRowId = eventDao.insertEvent(eventToInsert)
+        if (insertedRowId < 0L) {
+            // A concurrent receive may have inserted the same event after the initial existence check.
+            sendAck(fromEndpointId, packet.packetId, event.id, AckPacket.STATUS_DUPLICATE)
+            _stats.update { it.copy(packetsDroppedDuplicate = it.packetsDroppedDuplicate + 1) }
+            return Result.success(false)
+        }
         _stats.update { it.copy(packetsStoredLocally = it.packetsStoredLocally + 1) }
         log("پیام [${event.displayName}]: «${event.text.take(30)}...» با پرش ${packet.hopCount} در پایگاه محلی ذخیره شد.")
 
@@ -304,5 +314,8 @@ class MeshRouter(
         }
 
         return relayedCount
+    }
+    fun close() {
+        scope.cancel()
     }
 }
