@@ -1,0 +1,22 @@
+<resources>
+    <string name="app_name">ThreadMesh</string>
+    <string name="title_threads">گفتگوها</string>
+    <string name="title_create_thread">موضوع جدید</string>
+    <string name="title_recent_changes">تغییرات جدید</string>
+    <string name="title_connection_status">وضعیت ارتباط</string>
+    <string name="title_settings">تنظیمات</string>
+    <string name="title_stance_change">ثبت تغییر دیدگاه</string>
+    <string name="title_reply">ارسال پاسخ</string>
+
+    <string name="status_offline_label">آفلاین / محلی</string>
+    <string name="status_offline_desc">این نسخه به شکل کاملاً محلی و مستقل کار می‌کند. پروتکل‌های ارتباط مش (Bluetooth و Nearby Connections) در فاز بعدی اضافه خواهند شد.</string>
+
+    <string name="scope_local_only">فقط محلی (LOCAL_ONLY)</string>
+    <string name="scope_mesh_public">عمومی در مش (MESH_PUBLIC)</string>
+    <string name="scope_global_public">عمومی سراسری (GLOBAL_PUBLIC)</string>
+    <string name="scope_not_active_notice">انتقال در این نسخه هنوز فعال نیست</string>
+
+    <string name="max_char_hint">حداکثر ۴۰۰۰ نویسه</string>
+    <string name="empty_text_error">متن نمی‌تواند خالی باشد.</string>
+    <string name="exceed_char_error">طول متن بیش از ۴۰۰۰ نویسه است.</string>
+</resources>

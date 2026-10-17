@@ -1,0 +1,6 @@
+{
+  "name": "ThreadMesh",
+  "description": "شبکه اجتماعی متن‌محور بومی با درخت گفتگو و ثبت تغییر دیدگاه",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
