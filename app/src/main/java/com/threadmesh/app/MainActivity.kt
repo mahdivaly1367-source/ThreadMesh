@@ -22,6 +22,7 @@ import com.threadmesh.app.data.repository.ThreadMeshRepository
 import com.threadmesh.app.ui.screens.*
 import com.threadmesh.app.ui.theme.ThreadMeshTheme
 import com.threadmesh.app.ui.viewmodel.ThreadMeshViewModel
+import com.threadmesh.app.transport.GoogleNearbyTransport
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -32,8 +33,6 @@ sealed class Screen(val route: String, val title: String, val icon: ImageVector)
     data object Status : Screen("status", "ارتباط", Icons.Default.WifiOff)
     data object Settings : Screen("settings", "تنظیمات", Icons.Default.Settings)
 }
-
-import com.threadmesh.app.transport.GoogleNearbyTransport
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
