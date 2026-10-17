@@ -12,8 +12,6 @@ import com.threadmesh.app.transport.PeerConnectionStatus
 import com.threadmesh.app.transport.TransportProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,7 +36,7 @@ class MeshRouter(
     private val eventDao: ThreadMeshDao,
     private val outboxDao: OutboxDao,
     private val transport: TransportProvider?,
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
 ) {
     private val _stats = MutableStateFlow(MeshRouterStats())
     val stats: StateFlow<MeshRouterStats> = _stats.asStateFlow()
@@ -127,17 +125,17 @@ class MeshRouter(
      * Dispatches an incoming raw string payload (ACK or RELAY packet).
      */
     suspend fun handleIncomingPayload(rawJson: String, fromEndpointId: String = "") {
-        // Older app builds may send a raw EventEntity JSON object. The ViewModel's
-        // compatibility collector handles it; it is not a RelayPacket envelope.
-        val rawObject = runCatching { JSONObject(rawJson) }.getOrNull()
-        if (rawObject != null && !rawObject.has("packetId") && rawObject.has("eventType")) {
-            return
-        }
-
         // Check if this payload is an ACK
         val ack = AckPacket.fromJson(rawJson)
         if (ack != null) {
             handleIncomingAck(ack, fromEndpointId)
+            return
+        }
+
+        // Legacy direct EventEntity JSON is emitted through incomingEvents. Do not parse it
+        // again as a relay envelope or produce a misleading malformed-packet error.
+        val rawObject = runCatching { JSONObject(rawJson) }.getOrNull()
+        if (rawObject != null && !rawObject.has("packetId") && rawObject.has("eventType")) {
             return
         }
 
@@ -150,9 +148,8 @@ class MeshRouter(
      */
     suspend fun handleIncomingAck(ack: AckPacket, fromEndpointId: String) {
         _stats.update { it.copy(acksReceived = it.acksReceived + 1) }
-        // flushOutboxToPeer checks Nearby endpoint IDs; persist the same identifier here.
-        // Fall back to the stable node ID only for transports that don't supply an endpoint ID.
-        val peerIdentifier = fromEndpointId.ifBlank { ack.ackFromNodeId }
+        // Outbox delivery deduplication uses Nearby endpoint IDs, not logical node IDs.
+        val peerIdentifier = if (fromEndpointId.isNotBlank()) fromEndpointId else ack.ackFromNodeId
         log("تأییدیه دریافت و ذخیره در گره مقصد (ACK) از $peerIdentifier برای بسته ${ack.packetId} دریافت شد (وضعیت: ${ack.status}).")
 
         // Record confirmed delivery for this specific peer without depriving other future peers!
@@ -220,11 +217,11 @@ class MeshRouter(
         } else {
             event
         }
-        val insertedRowId = eventDao.insertEvent(eventToInsert)
-        if (insertedRowId < 0L) {
-            // A concurrent receive may have inserted the same event after the initial existence check.
-            sendAck(fromEndpointId, packet.packetId, event.id, AckPacket.STATUS_DUPLICATE)
+        val insertResult = eventDao.insertEvent(eventToInsert)
+        if (insertResult <= 0L) {
+            // Another collector may have inserted this event after the initial existence check.
             _stats.update { it.copy(packetsDroppedDuplicate = it.packetsDroppedDuplicate + 1) }
+            sendAck(fromEndpointId, packet.packetId, event.id, AckPacket.STATUS_DUPLICATE)
             return Result.success(false)
         }
         _stats.update { it.copy(packetsStoredLocally = it.packetsStoredLocally + 1) }
@@ -322,8 +319,5 @@ class MeshRouter(
         }
 
         return relayedCount
-    }
-    fun close() {
-        scope.cancel()
     }
 }

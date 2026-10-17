@@ -19,15 +19,14 @@ import androidx.navigation.compose.*
 import androidx.navigation.navArgument
 import com.threadmesh.app.data.local.AppDatabase
 import com.threadmesh.app.data.repository.ThreadMeshRepository
-import com.threadmesh.app.mesh.MeshRouter
-import com.threadmesh.app.transport.GoogleNearbyTransport
 import com.threadmesh.app.ui.screens.*
 import com.threadmesh.app.ui.theme.ThreadMeshTheme
 import com.threadmesh.app.ui.viewmodel.ThreadMeshViewModel
+import com.threadmesh.app.transport.GoogleNearbyTransport
+import java.util.UUID
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import java.util.UUID
 
 sealed class Screen(val route: String, val title: String, val icon: ImageVector) {
     data object Threads : Screen("threads", "گفتگوها", Icons.Default.Chat)
@@ -48,22 +47,23 @@ class MainActivity : ComponentActivity() {
             null
         }
 
-        // Keep the node identity stable across process restarts so relay-loop checks remain useful.
+        // Persist the node identity so the relay loop-prevention path survives app restarts.
         val identityPreferences = getSharedPreferences("threadmesh_identity", MODE_PRIVATE)
-        val nodeId = identityPreferences.getString("node_id", null) ?: UUID.randomUUID().toString().also {
-            identityPreferences.edit().putString("node_id", it).apply()
-        }
-        val router = MeshRouter(
-            localNodeId = nodeId,
-            eventDao = database.threadMeshDao(),
-            outboxDao = database.outboxDao(),
-            transport = transport
-        )
+        val localNodeId = identityPreferences.getString("local_node_id", null)
+            ?: UUID.randomUUID().toString().also { generatedId ->
+                identityPreferences.edit().putString("local_node_id", generatedId).apply()
+            }
 
         val viewModel = ViewModelProvider(this, object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 @Suppress("UNCHECKED_CAST")
-                return ThreadMeshViewModel(repository, transport, router, nodeId) as T
+                return ThreadMeshViewModel(
+                    repository = repository,
+                    transport = transport,
+                    threadMeshDao = database.threadMeshDao(),
+                    outboxDao = database.outboxDao(),
+                    initialLocalAuthorId = localNodeId
+                ) as T
             }
         })[ThreadMeshViewModel::class.java]
 

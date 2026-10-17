@@ -5,28 +5,47 @@ import androidx.lifecycle.viewModelScope
 import com.threadmesh.app.data.model.EventEntity
 import com.threadmesh.app.data.model.EventType
 import com.threadmesh.app.data.model.PublishScope
+import com.threadmesh.app.data.local.OutboxDao
+import com.threadmesh.app.data.local.ThreadMeshDao
+import com.threadmesh.app.mesh.MeshRouter
 import com.threadmesh.app.data.repository.RecentChangeEventItem
 import com.threadmesh.app.data.repository.ThreadListItem
 import com.threadmesh.app.data.repository.ThreadMeshRepository
 import com.threadmesh.app.data.repository.TreeNode
-import com.threadmesh.app.mesh.MeshRouter
-import com.threadmesh.app.transport.DiscoveredPeer
-import com.threadmesh.app.transport.MeshServiceState
-import com.threadmesh.app.transport.PeerConnectionStatus
-import com.threadmesh.app.transport.TransportProvider
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.util.UUID
 
+import com.threadmesh.app.transport.DiscoveredPeer
+import com.threadmesh.app.transport.MeshServiceState
+import com.threadmesh.app.transport.PeerConnectionStatus
+import com.threadmesh.app.transport.TransportProvider
+
 class ThreadMeshViewModel(
     private val repository: ThreadMeshRepository,
     private val transport: TransportProvider? = null,
-    private val meshRouter: MeshRouter? = null,
-    initialAuthorId: String = UUID.randomUUID().toString().take(8)
+    threadMeshDao: ThreadMeshDao? = null,
+    outboxDao: OutboxDao? = null,
+    initialLocalAuthorId: String? = null
 ) : ViewModel() {
 
-    private val _localAuthorId = MutableStateFlow(initialAuthorId)
+    private val _localAuthorId = MutableStateFlow(
+        initialLocalAuthorId?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString().take(8)
+    )
     val localAuthorId: StateFlow<String> = _localAuthorId.asStateFlow()
+
+    // The router belongs to the ViewModel lifecycle and shares the same stable identity as local posts.
+    private val meshRouter: MeshRouter? = if (threadMeshDao != null && outboxDao != null) {
+        MeshRouter(
+            localNodeId = _localAuthorId.value,
+            eventDao = threadMeshDao,
+            outboxDao = outboxDao,
+            transport = transport,
+            scope = viewModelScope
+        )
+    } else {
+        null
+    }
 
     private val _displayName = MutableStateFlow("کاربر محلی")
     val displayName: StateFlow<String> = _displayName.asStateFlow()
@@ -50,23 +69,7 @@ class ThreadMeshViewModel(
     val meshError: StateFlow<String?> = transport?.lastError
         ?: MutableStateFlow<String?>(null).asStateFlow()
 
-    init {
-        // Collect incoming mesh events from transport and persist in Room DB
-        if (transport != null) {
-            viewModelScope.launch {
-                transport.incomingEvents.collect { incomingEvent ->
-                    val result = repository.importIncomingMeshEvent(incomingEvent)
-                    result.onSuccess { isNew ->
-                        if (isNew) {
-                            _userMessage.value = "رویداد عمومی جدید (${incomingEvent.displayName}) از شبکه مش دریافت و ذخیره شد."
-                        }
-                    }.onFailure { err ->
-                        _userMessage.value = "رویداد نامعتبر از مش دریافت شد: ${err.message}"
-                    }
-                }
-            }
-        }
-    }
+    // MeshRouter owns incoming-event persistence and relay processing to avoid duplicate writes.
 
     // Threads overview flow
     val threadListItems: StateFlow<List<ThreadListItem>> = combine(
@@ -145,9 +148,11 @@ class ThreadMeshViewModel(
                 text = text,
                 scope = scope
             )
-            if (result.isSuccess) flushPendingMeshMessages()
             result.onSuccess { event ->
                 _userMessage.value = "موضوع اصلی با موفقیت ذخیره شد."
+                if (event.publishScope == PublishScope.MESH_PUBLIC) {
+                    viewModelScope.launch { flushPendingToConnectedPeers() }
+                }
                 onSuccess(event.id)
             }.onFailure { err ->
                 _userMessage.value = err.message ?: "خطا در ثبت موضوع"
@@ -164,9 +169,11 @@ class ThreadMeshViewModel(
                 text = text,
                 scope = scope
             )
-            if (result.isSuccess) flushPendingMeshMessages()
-            result.onSuccess {
+            result.onSuccess { event ->
                 _userMessage.value = "پاسخ با موفقیت به ساختار گفتگو پیوست شد."
+                if (event.publishScope == PublishScope.MESH_PUBLIC) {
+                    viewModelScope.launch { flushPendingToConnectedPeers() }
+                }
                 onSuccess()
             }.onFailure { err ->
                 _userMessage.value = err.message ?: "خطا در ثبت پاسخ"
@@ -183,13 +190,30 @@ class ThreadMeshViewModel(
                 explanationText = explanation,
                 scope = scope
             )
-            if (result.isSuccess) flushPendingMeshMessages()
-            result.onSuccess {
+            result.onSuccess { event ->
                 _userMessage.value = "تغییر دیدگاه بدون بازنویسی پست اصلی ثبت شد."
+                if (event.publishScope == PublishScope.MESH_PUBLIC) {
+                    viewModelScope.launch { flushPendingToConnectedPeers() }
+                }
                 onSuccess()
             }.onFailure { err ->
                 _userMessage.value = err.message ?: "خطا در ثبت تغییر دیدگاه"
             }
+        }
+    }
+
+    /**
+     * Newly created public mesh posts are already persisted in the Room outbox by the repository.
+     * If peers are connected now, flush the durable queue immediately instead of waiting for a
+     * later connection-state change or a manual sync button.
+     */
+    private suspend fun flushPendingToConnectedPeers() {
+        val router = meshRouter ?: return
+        val connectedPeers = transport?.peers?.value
+            ?.filter { it.status == PeerConnectionStatus.CONNECTED }
+            .orEmpty()
+        connectedPeers.forEach { peer ->
+            router.flushOutboxToPeer(peer.endpointId)
         }
     }
 
@@ -218,43 +242,18 @@ class ThreadMeshViewModel(
     }
 
     fun acceptPeer(endpointId: String) {
-        // MeshRouter observes the CONNECTED transition and drains the durable RelayPacket outbox.
-        // Do not bypass the relay envelope with raw EventEntity payloads here.
+        // Once the connection reaches CONNECTED, MeshRouter flushes the durable RelayPacket outbox.
         transport?.acceptConnection(endpointId)
-        _userMessage.value = "درخواست پذیرفته شد؛ پس از برقراری اتصال، صف پیام‌های مش ارسال می‌شود."
     }
 
     fun rejectPeer(endpointId: String) {
         transport?.rejectConnection(endpointId)
     }
 
-
-    /**
-     * Attempt to send queued public RelayPackets to peers that are already connected.
-     * The router keeps packets durable until expiry and tracks ACKs per connection.
-     */
-    private suspend fun flushPendingMeshMessages() {
-        val router = meshRouter ?: return
-        val connected = transport?.peers?.value.orEmpty()
-            .filter { it.status == PeerConnectionStatus.CONNECTED }
-        for (peer in connected) {
-            router.flushOutboxToPeer(peer.endpointId)
-        }
-    }
-
     fun syncMeshEventsToPeer(endpointId: String) {
         viewModelScope.launch {
             val count = meshRouter?.flushOutboxToPeer(endpointId) ?: 0
-            _userMessage.value = if (meshRouter == null) {
-                "موتور انتقال مش در دسترس نیست."
-            } else {
-                "$count بستهٔ در انتظار انتقال برای این همتا ارسال شد."
-            }
+            _userMessage.value = "$count بستهٔ مش برای همتای انتخاب‌شده ارسال شد؛ تأیید ذخیرهٔ مقصد جداگانه دریافت می‌شود."
         }
-    }
-
-    override fun onCleared() {
-        meshRouter?.close()
-        super.onCleared()
     }
 }

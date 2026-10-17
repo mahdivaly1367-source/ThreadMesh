@@ -300,7 +300,8 @@ class MultiHopStoreAndForwardTest {
 
         val outboxItemA = outboxA.getByPacketId(packet.packetId)
         assertNotNull(outboxItemA)
-        assertTrue(outboxItemA!!.hasDeliveredTo("node_B"))
+        assertTrue(outboxItemA!!.hasDeliveredTo("conn_B"))
+        assertFalse(outboxItemA.hasDeliveredTo("node_B"))
     }
 
     @Test

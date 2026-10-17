@@ -18,10 +18,10 @@ abstract class AppDatabase : RoomDatabase() {
 
     companion object {
         /**
-         * Version 1 contained mesh_events. Version 2 adds the durable mesh_outbox table.
-         * Preserve all existing conversation data during the upgrade.
+         * Introduces the relay outbox table without deleting existing local conversations.
+         * Destructive migration is intentionally avoided.
          */
-        private val MIGRATION_1_2 = object : Migration(1, 2) {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.execSQL(
                     """CREATE TABLE IF NOT EXISTS `mesh_outbox` (
@@ -36,11 +36,17 @@ abstract class AppDatabase : RoomDatabase() {
                         `relayedToPeersCount` INTEGER NOT NULL,
                         `deliveredPeerIds` TEXT NOT NULL,
                         PRIMARY KEY(`packetId`)
-                    )""".trimIndent()
+                    )"""
                 )
-                database.execSQL("CREATE INDEX IF NOT EXISTS `index_mesh_outbox_eventId` ON `mesh_outbox` (`eventId`)")
-                database.execSQL("CREATE INDEX IF NOT EXISTS `index_mesh_outbox_status` ON `mesh_outbox` (`status`)")
-                database.execSQL("CREATE INDEX IF NOT EXISTS `index_mesh_outbox_expiresAt` ON `mesh_outbox` (`expiresAt`)")
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_mesh_outbox_eventId` ON `mesh_outbox` (`eventId`)"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_mesh_outbox_status` ON `mesh_outbox` (`status`)"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_mesh_outbox_expiresAt` ON `mesh_outbox` (`expiresAt`)"
+                )
             }
         }
 
@@ -53,9 +59,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "threadmesh_local.db"
-                )
-                    .addMigrations(MIGRATION_1_2)
-                    .build()
+                ).addMigrations(MIGRATION_1_2).build()
                 INSTANCE = instance
                 instance
             }
