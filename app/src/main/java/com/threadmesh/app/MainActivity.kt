@@ -22,6 +22,7 @@ import com.threadmesh.app.data.repository.ThreadMeshRepository
 import com.threadmesh.app.ui.screens.*
 import com.threadmesh.app.ui.theme.ThreadMeshTheme
 import com.threadmesh.app.ui.viewmodel.ThreadMeshViewModel
+import com.threadmesh.app.security.AndroidKeystoreEventAuthenticator
 import com.threadmesh.app.transport.GoogleNearbyTransport
 import java.util.UUID
 import java.net.URLDecoder
@@ -40,7 +41,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         val database = AppDatabase.getDatabase(applicationContext)
-        val repository = ThreadMeshRepository(database.threadMeshDao(), database.outboxDao())
+        val eventAuthenticator = AndroidKeystoreEventAuthenticator()
+        val repository = ThreadMeshRepository(
+            database.threadMeshDao(),
+            database.outboxDao(),
+            eventAuthenticator
+        )
         val transport = try {
             GoogleNearbyTransport(applicationContext)
         } catch (_: Exception) {
@@ -62,7 +68,8 @@ class MainActivity : ComponentActivity() {
                     transport = transport,
                     threadMeshDao = database.threadMeshDao(),
                     outboxDao = database.outboxDao(),
-                    initialLocalAuthorId = localNodeId
+                    initialLocalAuthorId = localNodeId,
+                    eventAuthenticator = eventAuthenticator
                 ) as T
             }
         })[ThreadMeshViewModel::class.java]

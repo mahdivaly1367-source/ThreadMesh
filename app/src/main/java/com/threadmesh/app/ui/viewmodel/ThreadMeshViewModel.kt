@@ -8,6 +8,7 @@ import com.threadmesh.app.data.model.PublishScope
 import com.threadmesh.app.data.local.OutboxDao
 import com.threadmesh.app.data.local.ThreadMeshDao
 import com.threadmesh.app.mesh.MeshRouter
+import com.threadmesh.app.security.EventAuthenticator
 import com.threadmesh.app.data.repository.RecentChangeEventItem
 import com.threadmesh.app.data.repository.ThreadListItem
 import com.threadmesh.app.data.repository.ThreadMeshRepository
@@ -26,7 +27,8 @@ class ThreadMeshViewModel(
     private val transport: TransportProvider? = null,
     threadMeshDao: ThreadMeshDao? = null,
     outboxDao: OutboxDao? = null,
-    initialLocalAuthorId: String? = null
+    initialLocalAuthorId: String? = null,
+    eventAuthenticator: EventAuthenticator? = null
 ) : ViewModel() {
 
     private val _localAuthorId = MutableStateFlow(
@@ -41,7 +43,8 @@ class ThreadMeshViewModel(
             eventDao = threadMeshDao,
             outboxDao = outboxDao,
             transport = transport,
-            scope = viewModelScope
+            scope = viewModelScope,
+            eventAuthenticator = eventAuthenticator
         )
     } else {
         null

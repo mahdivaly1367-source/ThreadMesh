@@ -10,6 +10,7 @@ import com.threadmesh.app.data.model.PublishScope
 import com.threadmesh.app.data.model.RelayPacket
 import com.threadmesh.app.transport.PeerConnectionStatus
 import com.threadmesh.app.transport.TransportProvider
+import com.threadmesh.app.security.EventAuthenticator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,7 +29,8 @@ data class MeshRouterStats(
     val packetsDroppedLoop: Int = 0,
     val packetsDroppedExpired: Int = 0,
     val packetsDroppedDuplicate: Int = 0,
-    val packetsDroppedScope: Int = 0
+    val packetsDroppedScope: Int = 0,
+    val packetsDroppedSignature: Int = 0
 )
 
 class MeshRouter(
@@ -36,7 +38,8 @@ class MeshRouter(
     private val eventDao: ThreadMeshDao,
     private val outboxDao: OutboxDao,
     private val transport: TransportProvider?,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
+    private val eventAuthenticator: EventAuthenticator? = null
 ) {
     private val _stats = MutableStateFlow(MeshRouterStats())
     val stats: StateFlow<MeshRouterStats> = _stats.asStateFlow()
@@ -53,14 +56,7 @@ class MeshRouter(
                 }
             }
 
-            // 2. Backward compatibility: listen to direct EventEntity streams if emitted
-            scope.launch {
-                transport.incomingEvents.collect { incomingEvent ->
-                    processIncomingEvent(incomingEvent, fromEndpointId = "")
-                }
-            }
-
-            // 3. When any peer connects, flush unexpired pending outbox items to that peer
+            // 2. When any peer connects, flush unexpired pending outbox items to that peer
             scope.launch {
                 transport.peers.collect { peerList ->
                     val newlyConnected = peerList.filter { it.status == PeerConnectionStatus.CONNECTED }
@@ -96,7 +92,14 @@ class MeshRouter(
             return Result.success(false)
         }
 
-        val packet = RelayPacket.fromEvent(event, localNodeId, maxHops = maxHops)
+        val authenticator = eventAuthenticator
+            ?: return Result.failure(IllegalStateException("امضای دیجیتال برای انتشار مش پیکربندی نشده است."))
+        val packet = RelayPacket.fromEvent(
+            event,
+            localNodeId,
+            maxHops = maxHops,
+            signature = authenticator.sign(event)
+        )
         val outboxItem = OutboxEntity(
             packetId = packet.packetId,
             eventId = event.id,
@@ -184,6 +187,14 @@ class MeshRouter(
             _stats.update { it.copy(packetsDroppedScope = it.packetsDroppedScope + 1) }
             log("بسته دریافتی به دلیل دامنه نامعتبر ${event.publishScope} رد شد.")
             return Result.failure(IllegalArgumentException("رویداد فاقد مجوز MESH_PUBLIC است."))
+        }
+
+        // Reject unsigned or modified event content before persistence and relaying.
+        val authenticator = eventAuthenticator
+        if (authenticator == null || !authenticator.verify(event, packet.signature)) {
+            _stats.update { it.copy(packetsDroppedSignature = it.packetsDroppedSignature + 1) }
+            log("بسته به‌دلیل نبودن امضای معتبر یا دستکاری محتوا رد شد.")
+            return Result.failure(SecurityException("امضای رویداد نامعتبر است."))
         }
 
         // 2. Expiration check
@@ -277,8 +288,8 @@ class MeshRouter(
      * Backward-compatible helper for incoming raw EventEntity from transport.
      */
     suspend fun processIncomingEvent(event: EventEntity, fromEndpointId: String = ""): Result<Boolean> {
-        val packet = RelayPacket.fromEvent(event, originNodeId = event.localAuthorId)
-        return processIncomingPacket(packet.toJson(), fromEndpointId)
+        // Signing an unsigned inbound event here would falsely claim that this relay authored it.
+        return Result.failure(SecurityException("رویداد قدیمی فاقد پاکت امضاشده است و پذیرفته نمی‌شود."))
     }
 
     /**

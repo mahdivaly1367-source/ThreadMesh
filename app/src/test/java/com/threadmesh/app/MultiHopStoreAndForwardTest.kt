@@ -4,6 +4,9 @@ import com.threadmesh.app.data.local.OutboxDao
 import com.threadmesh.app.data.local.ThreadMeshDao
 import com.threadmesh.app.data.model.*
 import com.threadmesh.app.mesh.MeshRouter
+import com.threadmesh.app.security.EventAuthenticator
+import com.threadmesh.app.security.EventSignature
+import com.threadmesh.app.security.EventSignatureCodec
 import com.threadmesh.app.transport.DiscoveredPeer
 import com.threadmesh.app.transport.MeshServiceState
 import com.threadmesh.app.transport.PeerConnectionStatus
@@ -15,6 +18,11 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
 import java.util.UUID
+import java.security.KeyPair
+import java.security.KeyPairGenerator
+import java.security.Signature
+import java.security.spec.ECGenParameterSpec
+import java.util.Base64
 
 /**
  * Multi-hop Store-and-Forward Mesh Unit Tests.
@@ -30,6 +38,31 @@ import java.util.UUID
  * 8. Scope enforcement: Non-MESH_PUBLIC events are rejected.
  */
 class MultiHopStoreAndForwardTest {
+
+    private class TestEventAuthenticator : EventAuthenticator {
+        private val pair: KeyPair = KeyPairGenerator.getInstance("EC").apply {
+            initialize(ECGenParameterSpec("secp256r1"))
+        }.generateKeyPair()
+
+        override fun sign(event: EventEntity): EventSignature {
+            val signer = Signature.getInstance(EventSignatureCodec.ALGORITHM)
+            signer.initSign(pair.private)
+            signer.update(EventSignatureCodec.canonicalBytes(event))
+            val publicBytes = pair.public.encoded
+            return EventSignature(
+                algorithm = EventSignatureCodec.ALGORITHM,
+                signerKeyId = EventSignatureCodec.keyId(publicBytes),
+                publicKeyBase64 = Base64.getEncoder().encodeToString(publicBytes),
+                signatureBase64 = Base64.getEncoder().encodeToString(signer.sign()),
+                signedAt = System.currentTimeMillis()
+            )
+        }
+
+        override fun verify(event: EventEntity, signature: EventSignature?): Boolean =
+            EventSignatureCodec.verify(event, signature)
+    }
+
+    private val testAuthenticator = TestEventAuthenticator()
 
     private class InMemoryDao : ThreadMeshDao {
         val storedEvents = mutableMapOf<String, EventEntity>()
@@ -149,7 +182,7 @@ class MultiHopStoreAndForwardTest {
         val daoB = InMemoryDao()
         val outboxB = InMemoryOutboxDao()
         val transportB = MockTransport()
-        val routerB = MeshRouter("node_B", daoB, outboxB, transportB)
+        val routerB = MeshRouter("node_B", daoB, outboxB, transportB, eventAuthenticator = testAuthenticator)
 
         // Event originated by Node A
         val eventA = EventEntity(
@@ -164,7 +197,7 @@ class MultiHopStoreAndForwardTest {
         )
 
         // Packet created at Node A with hopCount = 0
-        val packetFromA = RelayPacket.fromEvent(eventA, originNodeId = "node_A", maxHops = 3)
+        val packetFromA = RelayPacket.fromEvent(eventA, originNodeId = "node_A", maxHops = 3, signature = testAuthenticator.sign(eventA))
         assertEquals(0, packetFromA.hopCount)
         assertEquals(listOf("node_A"), packetFromA.visitedNodeIds)
 
@@ -190,7 +223,7 @@ class MultiHopStoreAndForwardTest {
         val daoC = InMemoryDao()
         val outboxC = InMemoryOutboxDao()
         val transportC = MockTransport()
-        val routerC = MeshRouter("node_C", daoC, outboxC, transportC)
+        val routerC = MeshRouter("node_C", daoC, outboxC, transportC, eventAuthenticator = testAuthenticator)
 
         val receiveResultC = routerC.processIncomingPacket(queuedPacket.toJson(), fromEndpointId = "conn_B")
         assertTrue(receiveResultC.isSuccess)
@@ -208,7 +241,7 @@ class MultiHopStoreAndForwardTest {
         val daoB = InMemoryDao()
         val outboxB = InMemoryOutboxDao()
         val transportB = MockTransport()
-        val routerB = MeshRouter("node_B", daoB, outboxB, transportB)
+        val routerB = MeshRouter("node_B", daoB, outboxB, transportB, eventAuthenticator = testAuthenticator)
 
         val event = EventEntity(
             id = "evt_spread_1",
@@ -251,7 +284,7 @@ class MultiHopStoreAndForwardTest {
         val daoB = InMemoryDao()
         val outboxB = InMemoryOutboxDao()
         val transportB = MockTransport()
-        val routerB = MeshRouter("node_B", daoB, outboxB, transportB)
+        val routerB = MeshRouter("node_B", daoB, outboxB, transportB, eventAuthenticator = testAuthenticator)
 
         val event = EventEntity(
             id = "evt_ack_test",
@@ -263,7 +296,7 @@ class MultiHopStoreAndForwardTest {
             text = "تست ارسال تأییدیه",
             publishScope = PublishScope.MESH_PUBLIC
         )
-        val packet = RelayPacket.fromEvent(event, "node_A")
+        val packet = RelayPacket.fromEvent(event, "node_A", signature = testAuthenticator.sign(event))
 
         // Node B receives packet from conn_A
         routerB.processIncomingPacket(packet.toJson(), fromEndpointId = "conn_A")
@@ -283,7 +316,7 @@ class MultiHopStoreAndForwardTest {
         // Now test Node A processing this ACK
         val daoA = InMemoryDao()
         val outboxA = InMemoryOutboxDao()
-        val routerA = MeshRouter("node_A", daoA, outboxA, null)
+        val routerA = MeshRouter("node_A", daoA, outboxA, null, eventAuthenticator = testAuthenticator)
         outboxA.insertOutboxItem(
             OutboxEntity(
                 packetId = packet.packetId,
@@ -308,7 +341,7 @@ class MultiHopStoreAndForwardTest {
     fun testLoopPreventionRejectsVisitedNode() = runBlocking {
         val dao = InMemoryDao()
         val outbox = InMemoryOutboxDao()
-        val router = MeshRouter("node_A", dao, outbox, null)
+        val router = MeshRouter("node_A", dao, outbox, null, eventAuthenticator = testAuthenticator)
 
         val event = EventEntity(
             id = "evt_loop_1",
@@ -325,6 +358,7 @@ class MultiHopStoreAndForwardTest {
         val loopedPacket = RelayPacket(
             packetId = "pkt_loop",
             event = event,
+            signature = testAuthenticator.sign(event),
             hopCount = 2,
             maxHops = 5,
             visitedNodeIds = listOf("node_A", "node_B")
@@ -341,7 +375,7 @@ class MultiHopStoreAndForwardTest {
     fun testMaxHopsEnforcementStopsFurtherRelay() = runBlocking {
         val dao = InMemoryDao()
         val outbox = InMemoryOutboxDao()
-        val router = MeshRouter("node_C", dao, outbox, null)
+        val router = MeshRouter("node_C", dao, outbox, null, eventAuthenticator = testAuthenticator)
 
         val event = EventEntity(
             id = "evt_max_hops",
@@ -358,6 +392,7 @@ class MultiHopStoreAndForwardTest {
         val maxedPacket = RelayPacket(
             packetId = "pkt_maxed",
             event = event,
+            signature = testAuthenticator.sign(event),
             hopCount = 3,
             maxHops = 3,
             visitedNodeIds = listOf("node_A", "node_B")
@@ -375,7 +410,7 @@ class MultiHopStoreAndForwardTest {
     fun testExpirationDropsStalePackets() = runBlocking {
         val dao = InMemoryDao()
         val outbox = InMemoryOutboxDao()
-        val router = MeshRouter("node_B", dao, outbox, null)
+        val router = MeshRouter("node_B", dao, outbox, null, eventAuthenticator = testAuthenticator)
 
         val staleEvent = EventEntity(
             id = "evt_stale",
@@ -391,6 +426,7 @@ class MultiHopStoreAndForwardTest {
         val expiredPacket = RelayPacket(
             packetId = "pkt_exp",
             event = staleEvent,
+            signature = testAuthenticator.sign(staleEvent),
             hopCount = 1,
             maxHops = 5,
             visitedNodeIds = listOf("node_A"),
@@ -408,7 +444,7 @@ class MultiHopStoreAndForwardTest {
     fun testScopeEnforcementRejectsLocalOnlyAndGlobalPublic() = runBlocking {
         val dao = InMemoryDao()
         val outbox = InMemoryOutboxDao()
-        val router = MeshRouter("node_B", dao, outbox, null)
+        val router = MeshRouter("node_B", dao, outbox, null, eventAuthenticator = testAuthenticator)
 
         val localOnlyEvent = EventEntity(
             id = "evt_local",
@@ -430,6 +466,7 @@ class MultiHopStoreAndForwardTest {
         val fakePacket = RelayPacket(
             packetId = "pkt_fake",
             event = localOnlyEvent,
+            signature = testAuthenticator.sign(localOnlyEvent),
             hopCount = 0,
             maxHops = 5,
             visitedNodeIds = listOf("node_A")

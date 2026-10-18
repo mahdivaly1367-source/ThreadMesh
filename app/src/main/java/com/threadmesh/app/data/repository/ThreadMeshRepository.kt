@@ -8,6 +8,7 @@ import com.threadmesh.app.data.model.RelayPacket
 import com.threadmesh.app.data.model.EventEntity
 import com.threadmesh.app.data.model.EventType
 import com.threadmesh.app.data.model.PublishScope
+import com.threadmesh.app.security.EventAuthenticator
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.util.UUID
@@ -37,7 +38,8 @@ data class RecentChangeEventItem(
 
 class ThreadMeshRepository(
     private val dao: ThreadMeshDao,
-    private val outboxDao: OutboxDao? = null
+    private val outboxDao: OutboxDao? = null,
+    private val eventAuthenticator: EventAuthenticator? = null
 ) {
 
     val rootThreadsFlow: Flow<List<EventEntity>> = dao.getAllRootThreadsFlow()
@@ -85,7 +87,13 @@ class ThreadMeshRepository(
 
     private suspend fun enqueueIfMeshPublic(event: EventEntity) {
         if (event.publishScope == PublishScope.MESH_PUBLIC && outboxDao != null) {
-            val packet = RelayPacket.fromEvent(event, originNodeId = event.localAuthorId)
+            // An unsigned public event must never enter the durable relay queue.
+            val authenticator = eventAuthenticator ?: return
+            val packet = RelayPacket.fromEvent(
+                event,
+                originNodeId = event.localAuthorId,
+                signature = authenticator.sign(event)
+            )
             val outboxItem = OutboxEntity(
                 packetId = packet.packetId,
                 eventId = event.id,

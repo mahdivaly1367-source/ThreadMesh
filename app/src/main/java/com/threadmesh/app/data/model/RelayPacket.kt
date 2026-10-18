@@ -2,6 +2,7 @@ package com.threadmesh.app.data.model
 
 import org.json.JSONArray
 import org.json.JSONObject
+import com.threadmesh.app.security.EventSignature
 
 /**
  * Encapsulates an acknowledgment packet sent back from receiving node to transmitting peer
@@ -61,6 +62,7 @@ data class AckPacket(
 data class RelayPacket(
     val packetId: String,
     val event: EventEntity,
+    val signature: EventSignature? = null,
     val hopCount: Int = 0,
     val maxHops: Int = DEFAULT_MAX_HOPS,
     val visitedNodeIds: List<String> = emptyList(),
@@ -77,12 +79,14 @@ data class RelayPacket(
             event: EventEntity,
             originNodeId: String,
             maxHops: Int = DEFAULT_MAX_HOPS,
-            ttlMillis: Long = DEFAULT_TTL_MILLIS
+            ttlMillis: Long = DEFAULT_TTL_MILLIS,
+            signature: EventSignature? = null
         ): RelayPacket {
             val now = System.currentTimeMillis()
             return RelayPacket(
                 packetId = "pkt_${event.id}_0",
                 event = event,
+                signature = signature,
                 hopCount = 0,
                 maxHops = maxHops,
                 visitedNodeIds = listOf(originNodeId),
@@ -116,9 +120,21 @@ data class RelayPacket(
                 visitedList.add(visitedArray.getString(i))
             }
 
+            val signatureJson = json.optJSONObject("eventSignature")
+            val eventSignature = signatureJson?.let {
+                EventSignature(
+                    algorithm = it.optString("algorithm", ""),
+                    signerKeyId = it.optString("signerKeyId", ""),
+                    publicKeyBase64 = it.optString("publicKeyBase64", ""),
+                    signatureBase64 = it.optString("signatureBase64", ""),
+                    signedAt = it.optLong("signedAt", 0L)
+                )
+            }
+
             return RelayPacket(
                 packetId = json.getString("packetId"),
                 event = event,
+                signature = eventSignature,
                 hopCount = json.getInt("hopCount"),
                 maxHops = json.optInt("maxHops", DEFAULT_MAX_HOPS),
                 visitedNodeIds = visitedList,
@@ -163,6 +179,16 @@ data class RelayPacket(
         json.put("expiresAt", expiresAt)
         json.put("relayedByNodeId", relayedByNodeId)
         json.put("relayedAt", relayedAt)
+        val signatureJson = signature?.let {
+            JSONObject().apply {
+                put("algorithm", it.algorithm)
+                put("signerKeyId", it.signerKeyId)
+                put("publicKeyBase64", it.publicKeyBase64)
+                put("signatureBase64", it.signatureBase64)
+                put("signedAt", it.signedAt)
+            }
+        }
+        json.put("eventSignature", signatureJson ?: JSONObject.NULL)
 
         val visitedArr = JSONArray()
         visitedNodeIds.forEach { visitedArr.put(it) }
