@@ -602,6 +602,7 @@ fun PeerCard(
                 ) {
                     OutlinedButton(
                         onClick = onSync,
+                        enabled = authenticatedIdentity != null,
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(16.dp))

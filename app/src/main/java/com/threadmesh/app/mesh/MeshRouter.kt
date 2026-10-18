@@ -212,9 +212,9 @@ class MeshRouter(
         if (rawObject != null && !rawObject.has("packetId") && rawObject.has("eventType")) return
 
         // No relay data is processed until this endpoint proves possession of the signing key.
-        if (!isPeerAuthenticated(fromEndpointId)) {
+        if (!isConnectedPeer(fromEndpointId) || !isPeerAuthenticated(fromEndpointId)) {
             _stats.update { it.copy(packetsDroppedSignature = it.packetsDroppedSignature + 1) }
-            log("بسته از اتصال احراز هویت‌نشده رد شد؛ ابتدا باید کلید گرهٔ مقابل تأیید شود.")
+            log("بسته از اتصال احراز هویت‌نشده یا قطع‌شده رد شد؛ ابتدا باید کلید گرهٔ مقابل تأیید شود.")
             return
         }
 
@@ -355,6 +355,7 @@ class MeshRouter(
         if (
             authenticator == null ||
             signature == null ||
+            !isConnectedPeer(fromEndpointId) ||
             boundIdentity == null ||
             boundIdentity != ack.ackFromNodeId ||
             ack.ackFromNodeId != signature.signerKeyId ||
@@ -537,8 +538,8 @@ class MeshRouter(
 
     private fun sendAck(toEndpointId: String, packetId: String, eventId: String, status: String) {
         if (toEndpointId.isBlank() || transport == null) return
-        if (!isPeerAuthenticated(toEndpointId)) {
-            log("تأییدیه برای اتصال احراز هویت‌نشده ارسال نشد.")
+        if (!isConnectedPeer(toEndpointId) || !isPeerAuthenticated(toEndpointId)) {
+            log("تأییدیه برای اتصال احراز هویت‌نشده یا قطع‌شده ارسال نشد.")
             return
         }
         val authenticator = eventAuthenticator ?: return
