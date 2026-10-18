@@ -11,6 +11,8 @@ import com.threadmesh.app.data.model.RelayPacket
 import com.threadmesh.app.transport.PeerConnectionStatus
 import com.threadmesh.app.transport.TransportProvider
 import com.threadmesh.app.security.EventAuthenticator
+import com.threadmesh.app.security.PeerIdentityProtocol
+import com.threadmesh.app.security.PeerIdentityMessage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -49,6 +51,14 @@ class MeshRouter(
     private val _relayLog = MutableStateFlow<List<String>>(emptyList())
     val relayLog: StateFlow<List<String>> = _relayLog.asStateFlow()
 
+    private val peerAuthLock = Any()
+    private data class PendingPeerChallenge(val nonce: String, val createdAt: Long)
+    private val pendingPeerChallenges = mutableMapOf<String, PendingPeerChallenge>()
+    private val _authenticatedPeerIdentities = MutableStateFlow<Map<String, String>>(emptyMap())
+
+    /** Nearby endpoint ID -> verified public-key fingerprint for this live connection. */
+    val authenticatedPeerIdentities: StateFlow<Map<String, String>> = _authenticatedPeerIdentities.asStateFlow()
+
     companion object {
         /** Wait before retrying the same packet to the same peer after a missing ACK. */
         internal const val PEER_RETRY_INTERVAL_MILLIS = 30_000L
@@ -64,12 +74,24 @@ class MeshRouter(
                 }
             }
 
-            // 2. When any peer connects, flush unexpired pending outbox items to that peer
+            // Release queued content only after the live endpoint proves control of its key.
             scope.launch {
                 transport.peers.collect { peerList ->
-                    val newlyConnected = peerList.filter { it.status == PeerConnectionStatus.CONNECTED }
-                    for (peer in newlyConnected) {
-                        flushOutboxToPeer(peer.endpointId)
+                    val connectedIds = peerList
+                        .filter { it.status == PeerConnectionStatus.CONNECTED }
+                        .map { it.endpointId }
+                        .toSet()
+                    synchronized(peerAuthLock) {
+                        pendingPeerChallenges.keys.retainAll(connectedIds)
+                        _authenticatedPeerIdentities.value =
+                            _authenticatedPeerIdentities.value.filterKeys { it in connectedIds }
+                    }
+                    for (peer in peerList.filter { it.status == PeerConnectionStatus.CONNECTED }) {
+                        if (_authenticatedPeerIdentities.value[peer.endpointId] == null) {
+                            startPeerAuthentication(peer.endpointId)
+                        } else {
+                            flushOutboxToPeer(peer.endpointId)
+                        }
                     }
                 }
             }
@@ -142,7 +164,11 @@ class MeshRouter(
         transport?.let { tp ->
             val connected = tp.peers.value.filter { it.status == PeerConnectionStatus.CONNECTED }
             for (p in connected) {
-                flushOutboxToPeer(p.endpointId)
+                if (_authenticatedPeerIdentities.value[p.endpointId] == null) {
+                    startPeerAuthentication(p.endpointId)
+                } else {
+                    flushOutboxToPeer(p.endpointId)
+                }
             }
         }
 
@@ -160,22 +186,163 @@ class MeshRouter(
             return
         }
 
-        // Check if this payload is an ACK
+        val rawObject = runCatching { JSONObject(rawJson) }.getOrNull()
+        when (rawObject?.optString("type")) {
+            PeerIdentityProtocol.CHALLENGE_TYPE -> {
+                val challenge = PeerIdentityProtocol.parse(rawJson) as? PeerIdentityMessage.Challenge
+                if (challenge == null) rejectPeerAuth("challenge malformed")
+                else handlePeerIdentityChallenge(challenge, fromEndpointId)
+                return
+            }
+            PeerIdentityProtocol.RESPONSE_TYPE -> {
+                val response = PeerIdentityProtocol.parse(rawJson) as? PeerIdentityMessage.Response
+                if (response == null) rejectPeerAuth("response malformed")
+                else handlePeerIdentityResponse(response, fromEndpointId)
+                return
+            }
+        }
+
         val ack = AckPacket.fromJson(rawJson)
         if (ack != null) {
             handleIncomingAck(ack, fromEndpointId)
             return
         }
 
-        // Legacy direct EventEntity JSON is emitted through incomingEvents. Do not parse it
-        // again as a relay envelope or produce a misleading malformed-packet error.
-        val rawObject = runCatching { JSONObject(rawJson) }.getOrNull()
-        if (rawObject != null && !rawObject.has("packetId") && rawObject.has("eventType")) {
+        // Legacy direct EventEntity JSON is ignored; only signed relay envelopes are accepted.
+        if (rawObject != null && !rawObject.has("packetId") && rawObject.has("eventType")) return
+
+        // No relay data is processed until this endpoint proves possession of the signing key.
+        if (!isPeerAuthenticated(fromEndpointId)) {
+            _stats.update { it.copy(packetsDroppedSignature = it.packetsDroppedSignature + 1) }
+            log("بسته از اتصال احراز هویت‌نشده رد شد؛ ابتدا باید کلید گرهٔ مقابل تأیید شود.")
             return
         }
 
-        // Otherwise process as RelayPacket
         processIncomingPacket(rawJson, fromEndpointId)
+    }
+
+    private fun rejectPeerAuth(reason: String) {
+        _stats.update { it.copy(packetsDroppedSignature = it.packetsDroppedSignature + 1) }
+        log("پیام احراز هویت همتا رد شد: $reason.")
+    }
+
+    private fun isConnectedPeer(endpointId: String): Boolean =
+        endpointId.isNotBlank() && transport?.peers?.value?.any {
+            it.endpointId == endpointId && it.status == PeerConnectionStatus.CONNECTED
+        } == true
+
+    private fun isPeerAuthenticated(endpointId: String): Boolean =
+        endpointId.isNotBlank() && _authenticatedPeerIdentities.value.containsKey(endpointId)
+
+    /**
+     * Starts a proof-of-possession exchange for one live Nearby endpoint. A fingerprint is a key
+     * identity, not proof of the owner's human identity.
+     */
+    internal fun startPeerAuthentication(endpointId: String): Boolean {
+        val auth = eventAuthenticator ?: return false
+        val activeTransport = transport ?: return false
+        if (!isConnectedPeer(endpointId) || isPeerAuthenticated(endpointId)) return false
+
+        val now = System.currentTimeMillis()
+        val challenge = synchronized(peerAuthLock) {
+            val pending = pendingPeerChallenges[endpointId]
+            if (pending != null && now - pending.createdAt < PeerIdentityProtocol.CHALLENGE_TIMEOUT_MILLIS) {
+                return false
+            }
+            PeerIdentityProtocol.createChallenge(auth).also {
+                pendingPeerChallenges[endpointId] = PendingPeerChallenge(it.nonce, now)
+            }
+        }
+        val sent = activeTransport.sendMeshPayload(endpointId, challenge.toJson())
+        if (sent.isSuccess) {
+            log("آغاز احراز هویت رمزنگاری‌شده برای همتای $endpointId.")
+            return true
+        }
+        synchronized(peerAuthLock) {
+            if (pendingPeerChallenges[endpointId]?.nonce == challenge.nonce) pendingPeerChallenges.remove(endpointId)
+        }
+        log("ارسال چالش احراز هویت به $endpointId ناموفق بود.")
+        return false
+    }
+
+    private fun handlePeerIdentityChallenge(
+        challenge: PeerIdentityMessage.Challenge,
+        fromEndpointId: String
+    ) {
+        val auth = eventAuthenticator
+        val activeTransport = transport
+        if (auth == null || activeTransport == null || !isConnectedPeer(fromEndpointId)) {
+            rejectPeerAuth("connection unavailable")
+            return
+        }
+        if (challenge.senderNodeId == auth.localIdentityId() || !PeerIdentityProtocol.verify(challenge, auth)) {
+            rejectPeerAuth("invalid signature or self-identity")
+            return
+        }
+        val existingIdentity = _authenticatedPeerIdentities.value[fromEndpointId]
+        if (existingIdentity != null && existingIdentity != challenge.senderNodeId) {
+            rejectPeerAuth("identity changed during a live connection")
+            return
+        }
+
+        val response = PeerIdentityProtocol.createResponse(auth, challenge.nonce)
+        if (activeTransport.sendMeshPayload(fromEndpointId, response.toJson()).isSuccess) {
+            log("پاسخ رمزنگاری‌شده به چالش $fromEndpointId ارسال شد.")
+        } else {
+            log("پاسخ احراز هویت به $fromEndpointId ارسال نشد.")
+        }
+
+        // Answering their challenge authenticates us to them, not the reverse. Require their
+        // response to our own unpredictable nonce before trusting this endpoint.
+        if (!isPeerAuthenticated(fromEndpointId)) startPeerAuthentication(fromEndpointId)
+    }
+
+    private suspend fun handlePeerIdentityResponse(
+        response: PeerIdentityMessage.Response,
+        fromEndpointId: String
+    ) {
+        val auth = eventAuthenticator
+        if (auth == null || !isConnectedPeer(fromEndpointId)) {
+            rejectPeerAuth("connection unavailable")
+            return
+        }
+        if (response.senderNodeId == auth.localIdentityId() || !PeerIdentityProtocol.verify(response, auth)) {
+            rejectPeerAuth("invalid response signature")
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        val pending = synchronized(peerAuthLock) { pendingPeerChallenges[fromEndpointId] }
+        if (
+            pending == null ||
+            now - pending.createdAt > PeerIdentityProtocol.CHALLENGE_TIMEOUT_MILLIS ||
+            response.challengeNonce != pending.nonce
+        ) {
+            rejectPeerAuth("challenge mismatch or expired")
+            return
+        }
+
+        var identityConflict = false
+        synchronized(peerAuthLock) {
+            val current = pendingPeerChallenges[fromEndpointId]
+            if (current == null || current.nonce != response.challengeNonce) return
+            val existingIdentity = _authenticatedPeerIdentities.value[fromEndpointId]
+            if (existingIdentity != null && existingIdentity != response.senderNodeId) {
+                pendingPeerChallenges.remove(fromEndpointId)
+                identityConflict = true
+            } else {
+                pendingPeerChallenges.remove(fromEndpointId)
+                _authenticatedPeerIdentities.value =
+                    _authenticatedPeerIdentities.value + (fromEndpointId to response.senderNodeId)
+            }
+        }
+        if (identityConflict) {
+            rejectPeerAuth("identity changed during a live connection")
+            return
+        }
+
+        log("هویت رمزنگاری‌شدهٔ همتای $fromEndpointId تأیید شد (\u0024{response.senderNodeId.take(12)}…).")
+        flushOutboxToPeer(fromEndpointId)
     }
 
     /**
@@ -184,9 +351,12 @@ class MeshRouter(
     suspend fun handleIncomingAck(ack: AckPacket, fromEndpointId: String) {
         val authenticator = eventAuthenticator
         val signature = ack.signature
+        val boundIdentity = _authenticatedPeerIdentities.value[fromEndpointId]
         if (
             authenticator == null ||
             signature == null ||
+            boundIdentity == null ||
+            boundIdentity != ack.ackFromNodeId ||
             ack.ackFromNodeId != signature.signerKeyId ||
             !authenticator.verifyPayload(ack.canonicalBytes(), signature)
         ) {
@@ -245,7 +415,8 @@ class MeshRouter(
             ?.filter { it.status == PeerConnectionStatus.CONNECTED && it.endpointId != exceptEndpointId }
             .orEmpty()
         for (peer in peers) {
-            flushOutboxToPeer(peer.endpointId)
+            if (isPeerAuthenticated(peer.endpointId)) flushOutboxToPeer(peer.endpointId)
+            else startPeerAuthentication(peer.endpointId)
         }
     }
 
@@ -366,6 +537,10 @@ class MeshRouter(
 
     private fun sendAck(toEndpointId: String, packetId: String, eventId: String, status: String) {
         if (toEndpointId.isBlank() || transport == null) return
+        if (!isPeerAuthenticated(toEndpointId)) {
+            log("تأییدیه برای اتصال احراز هویت‌نشده ارسال نشد.")
+            return
+        }
         val authenticator = eventAuthenticator ?: return
         val unsignedAck = AckPacket(
             packetId = packetId,
@@ -398,6 +573,12 @@ class MeshRouter(
      * the message even after Node C has already received it.
      */
     suspend fun flushOutboxToPeer(peerEndpointId: String): Int {
+        if (!isConnectedPeer(peerEndpointId)) return 0
+        if (!isPeerAuthenticated(peerEndpointId)) {
+            startPeerAuthentication(peerEndpointId)
+            return 0
+        }
+
         val now = System.currentTimeMillis()
         outboxDao.markExpiredPackets(now)
         val pending = outboxDao.getPendingPackets(now)

@@ -40,6 +40,7 @@ fun ConnectionStatusScreen(
     val userMsg by viewModel.userMessage.collectAsState()
     val routerStats by viewModel.meshRouterStats.collectAsState()
     val relayLog by viewModel.meshRelayLog.collectAsState()
+    val authenticatedPeerIdentities by viewModel.authenticatedPeerIdentities.collectAsState()
 
     var permissionsGranted by remember { mutableStateOf(false) }
     var permissionDeniedNotice by remember { mutableStateOf(false) }
@@ -229,7 +230,7 @@ fun ConnectionStatusScreen(
                         }
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "این ارتباط مبتنی بر استراتژی P2P_CLUSTER است که به چندین دستگاه در مجاورت فیزیکی اجازه می‌دهد مستقیماً متصل شوند. این ساختار صرفاً اتصال همتا به همتای مستقیم است و مسیریابی چندمرحله‌ای (Multi-hop routing) در آن ادعا نمی‌شود.",
+                            text = "هر پیوند رادیویی Nearby مستقیم است؛ انتقال چندمرحله‌ای در لایهٔ برنامه و با صف ذخیره‌و‌انتقال بین چند پیوند انجام می‌شود. عملکرد واقعی آن باید روی چند گوشی و با قطع‌و‌وصل شبکه آزمایش شود.",
                             style = MaterialTheme.typography.bodySmall,
                             color = Slate700,
                             lineHeight = 20.sp
@@ -301,6 +302,7 @@ fun ConnectionStatusScreen(
                 items(peers, key = { it.endpointId }) { peer ->
                     PeerCard(
                         peer = peer,
+                        authenticatedIdentity = authenticatedPeerIdentities[peer.endpointId],
                         onRequestConnect = { viewModel.connectToPeer(peer.endpointId) },
                         onAccept = { viewModel.acceptPeer(peer.endpointId) },
                         onReject = { viewModel.rejectPeer(peer.endpointId) },
@@ -391,7 +393,7 @@ fun ConnectionStatusScreen(
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "۱. فقط رویدادهای MESH_PUBLIC از مسیر مش منتقل می‌شوند؛ LOCAL_ONLY و GLOBAL_PUBLIC مسدود هستند.\n۲. محتوای رویدادهای مش با ECDSA و کلید Android Keystore امضا می‌شود؛ گیرنده امضا را پیش از ذخیره بررسی می‌کند.\n۳. تأییدیهٔ دریافت (ACK) نیز امضا می‌شود و با شناسهٔ بسته و رویداد ارسالی تطبیق داده می‌شود.\n۴. هنوز مسیریابی رادیویی چندمرحله‌ای روی دستگاه‌های واقعی، عملکرد پیوسته در پس‌زمینه و اعتماد به هویت انسانیِ کلیدها به‌طور کامل اعتبارسنجی نشده‌اند.",
+                            text = "۱. فقط رویدادهای MESH_PUBLIC از مش منتقل می‌شوند.\n۲. رویدادها با ECDSA امضا می‌شوند و پیش از ذخیره بررسی می‌گردند.\n۳. هر اتصال باید با چالش تصادفی و امضای ECDSA احراز هویت شود؛ ACK فقط از کلید تأییدشدهٔ همان اتصال پذیرفته می‌شود.\n۴. اثرانگشت کلید، هویت انسانی را اثبات نمی‌کند و فعلاً بین نصب‌های مجدد پین نمی‌شود.\n۵. انتقال واقعی چندمرحله‌ای باید با چند گوشی آزمایش شود.",
                             style = MaterialTheme.typography.bodySmall,
                             color = Slate600,
                             lineHeight = 22.sp
@@ -428,6 +430,7 @@ private fun DiagnosticMetric(label: String, value: String, modifier: Modifier = 
 @Composable
 fun PeerCard(
     peer: DiscoveredPeer,
+    authenticatedIdentity: String? = null,
     onRequestConnect: () -> Unit,
     onAccept: () -> Unit,
     onReject: () -> Unit,
@@ -513,6 +516,31 @@ fun PeerCard(
                             text = "قطع شد",
                             style = MaterialTheme.typography.labelSmall,
                             color = Slate400
+                        )
+                    }
+                }
+            }
+
+            if (peer.status == PeerConnectionStatus.CONNECTED) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = if (authenticatedIdentity != null) Emerald50 else Amber50,
+                    shape = RoundedCornerShape(8.dp),
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        (if (authenticatedIdentity != null) Emerald600 else Amber600).copy(alpha = 0.3f)
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = if (authenticatedIdentity != null) {
+                                "هویت کلید تأیید شد · SHA-256 " + authenticatedIdentity.take(12) + "…"
+                            } else {
+                                "در انتظار احراز هویت رمزنگاری‌شده؛ انتقال داده هنوز مجاز نیست."
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (authenticatedIdentity != null) Emerald600 else Amber600
                         )
                     }
                 }

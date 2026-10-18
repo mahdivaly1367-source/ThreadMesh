@@ -7,6 +7,8 @@ import com.threadmesh.app.mesh.MeshRouter
 import com.threadmesh.app.security.EventAuthenticator
 import com.threadmesh.app.security.EventSignature
 import com.threadmesh.app.security.EventSignatureCodec
+import com.threadmesh.app.security.PeerIdentityProtocol
+import com.threadmesh.app.security.PeerIdentityMessage
 import com.threadmesh.app.transport.DiscoveredPeer
 import com.threadmesh.app.transport.MeshServiceState
 import com.threadmesh.app.transport.PeerConnectionStatus
@@ -15,6 +17,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
 import org.junit.Test
 import java.util.UUID
@@ -71,6 +75,41 @@ class MultiHopStoreAndForwardTest {
     }
 
     private val testAuthenticator = TestEventAuthenticator()
+    private val peerAuthenticator = TestEventAuthenticator()
+
+    /**
+     * Simulates the remote peer signing this router's fresh challenge, while still exercising
+     * the exact JSON parser, nonce comparison, signature verifier, and endpoint binding.
+     */
+    private suspend fun authenticatePeer(
+        router: MeshRouter,
+        transport: MockTransport,
+        endpointId: String,
+        remoteAuthenticator: EventAuthenticator
+    ) {
+        val startIndex = transport.transmittedPayloads.size
+        transport.peers.value = transport.peers.value
+            .filterNot { it.endpointId == endpointId } +
+            DiscoveredPeer(endpointId, "Test peer", PeerConnectionStatus.CONNECTED)
+
+        router.startPeerAuthentication(endpointId)
+        var challengeJson: String? = null
+        withTimeout(3_000L) {
+            while (challengeJson == null) {
+                challengeJson = transport.transmittedPayloads
+                    .drop(startIndex)
+                    .firstOrNull { (dest, payload) ->
+                        dest == endpointId &&
+                            PeerIdentityProtocol.parse(payload) is PeerIdentityMessage.Challenge
+                    }?.second
+                if (challengeJson == null) delay(10L)
+            }
+        }
+        val challenge = PeerIdentityProtocol.parse(challengeJson!!) as PeerIdentityMessage.Challenge
+        val response = PeerIdentityProtocol.createResponse(remoteAuthenticator, challenge.nonce)
+        router.handleIncomingPayload(response.toJson(), endpointId)
+        assertEquals(remoteAuthenticator.localIdentityId(), router.authenticatedPeerIdentities.value[endpointId])
+    }
 
     private class InMemoryDao : ThreadMeshDao {
         val storedEvents = mutableMapOf<String, EventEntity>()
@@ -273,28 +312,27 @@ class MultiHopStoreAndForwardTest {
         )
         routerB.enqueueForRelay(event)
 
-        // First peer connects: Peer C
+        // The packet is queued before any peer is connected.
         assertEquals(1, outboxB.getPendingPackets().size)
-        val relayedToC = routerB.flushOutboxToPeer("peer_C")
-        assertEquals(1, relayedToC)
 
-        // Confirm delivery to Peer C
+        // Peer C authenticates; authentication completion triggers first delivery.
+        authenticatePeer(routerB, transportB, "peer_C", peerAuthenticator)
         val packet = outboxB.getPendingPackets()[0]
+        assertTrue(packet.lastAttemptAtFor("peer_C") > 0L)
         outboxB.recordConfirmedPeerDelivery(packet.packetId, "peer_C")
 
-        // Crucial assertion: packet is STILL PENDING and unexpired for future peers!
+        // The packet remains pending for new peers but is not sent again to confirmed peer C.
         val pendingStill = outboxB.getPendingPackets()
         assertEquals(1, pendingStill.size)
         assertTrue(pendingStill[0].hasDeliveredTo("peer_C"))
         assertFalse(pendingStill[0].hasDeliveredTo("peer_D"))
+        assertEquals(0, routerB.flushOutboxToPeer("peer_C"))
 
-        // Attempt flush to peer C again -> Should be skipped (already delivered to C)
-        val resendToC = routerB.flushOutboxToPeer("peer_C")
-        assertEquals(0, resendToC)
-
-        // Second peer connects later: Peer D -> MUST receive the packet!
-        val relayedToD = routerB.flushOutboxToPeer("peer_D")
-        assertEquals(1, relayedToD)
+        // Peer D authenticates later and independently receives the queued packet.
+        authenticatePeer(routerB, transportB, "peer_D", peerAuthenticator)
+        val afterD = outboxB.getByPacketId(packet.packetId)!!
+        assertTrue(afterD.lastAttemptAtFor("peer_D") > 0L)
+        assertFalse(afterD.hasDeliveredTo("peer_D")) // No ACK has been returned by D yet.
     }
 
     @Test
@@ -315,9 +353,14 @@ class MultiHopStoreAndForwardTest {
         )
 
         router.enqueueForRelay(event)
-        assertEquals(1, router.flushOutboxToPeer("peer_A"))
+        authenticatePeer(router, transport, "peer_A", peerAuthenticator)
+        val afterA = outbox.getByEventId(event.id)!!
+        assertTrue(afterA.lastAttemptAtFor("peer_A") > 0L)
         assertEquals(0, router.flushOutboxToPeer("peer_A")) // ACK timeout has not elapsed.
-        assertEquals(1, router.flushOutboxToPeer("peer_B")) // Peer A must not block peer B.
+
+        authenticatePeer(router, transport, "peer_B", peerAuthenticator)
+        val afterB = outbox.getByEventId(event.id)!!
+        assertTrue(afterB.lastAttemptAtFor("peer_B") > 0L) // A's retry delay does not block B.
 
         val packet = outbox.getByEventId(event.id)!!
         val backdated = packet.withPeerAttempt(
@@ -329,11 +372,121 @@ class MultiHopStoreAndForwardTest {
     }
 
     @Test
+    fun testPeerHandshakeRequiresFreshSignedChallengeResponse() = runBlocking {
+        val dao = InMemoryDao()
+        val outbox = InMemoryOutboxDao()
+        val transport = MockTransport()
+        val router = MeshRouter("node_auth", dao, outbox, transport, eventAuthenticator = testAuthenticator)
+
+        val event = EventEntity(
+            id = "evt_auth_gate",
+            localAuthorId = testAuthenticator.localIdentityId(),
+            displayName = "گره آزمایشی",
+            createdAt = System.currentTimeMillis(),
+            eventType = EventType.ROOT_THREAD,
+            rootThreadId = "evt_auth_gate",
+            text = "نباید پیش از احراز هویت ارسال شود",
+            publishScope = PublishScope.MESH_PUBLIC
+        )
+        router.enqueueForRelay(event)
+        transport.peers.value = listOf(
+            DiscoveredPeer("peer_auth", "Peer", PeerConnectionStatus.CONNECTED)
+        )
+        router.startPeerAuthentication("peer_auth")
+
+        var challengeJson: String? = null
+        withTimeout(3_000L) {
+            while (challengeJson == null) {
+                challengeJson = transport.transmittedPayloads.firstOrNull { (_, payload) ->
+                    PeerIdentityProtocol.parse(payload) is PeerIdentityMessage.Challenge
+                }?.second
+                if (challengeJson == null) delay(10L)
+            }
+        }
+        val challenge = PeerIdentityProtocol.parse(challengeJson!!) as PeerIdentityMessage.Challenge
+
+        // A response signed for a different nonce must never authenticate this endpoint.
+        val wrongResponse = PeerIdentityProtocol.createResponse(peerAuthenticator, "0".repeat(64))
+        router.handleIncomingPayload(wrongResponse.toJson(), "peer_auth")
+        assertFalse(router.authenticatedPeerIdentities.value.containsKey("peer_auth"))
+        assertEquals(0L, outbox.getByEventId(event.id)!!.lastAttemptAtFor("peer_auth"))
+
+        // Only a response signed over our exact one-time nonce permits relay.
+        val validResponse = PeerIdentityProtocol.createResponse(peerAuthenticator, challenge.nonce)
+        router.handleIncomingPayload(validResponse.toJson(), "peer_auth")
+        assertEquals(peerAuthenticator.localIdentityId(), router.authenticatedPeerIdentities.value["peer_auth"])
+        assertTrue(outbox.getByEventId(event.id)!!.lastAttemptAtFor("peer_auth") > 0L)
+
+        // Replaying the valid response after its pending nonce has been consumed is rejected.
+        router.handleIncomingPayload(validResponse.toJson(), "peer_auth")
+        assertEquals(peerAuthenticator.localIdentityId(), router.authenticatedPeerIdentities.value["peer_auth"])
+    }
+
+    @Test
+    fun testIncomingChallengeGetsSignedResponseButDoesNotAuthenticatePeerByItself() = runBlocking {
+        val dao = InMemoryDao()
+        val outbox = InMemoryOutboxDao()
+        val transport = MockTransport()
+        val router = MeshRouter("node_mutual", dao, outbox, transport, eventAuthenticator = testAuthenticator)
+        transport.peers.value = listOf(
+            DiscoveredPeer("peer_mutual", "Peer", PeerConnectionStatus.CONNECTED)
+        )
+
+        val remoteChallenge = PeerIdentityProtocol.createChallenge(peerAuthenticator)
+        router.handleIncomingPayload(remoteChallenge.toJson(), "peer_mutual")
+
+        val outgoingResponse = transport.transmittedPayloads
+            .mapNotNull { (_, payload) -> PeerIdentityProtocol.parse(payload) }
+            .filterIsInstance<PeerIdentityMessage.Response>()
+            .firstOrNull { it.challengeNonce == remoteChallenge.nonce }
+        assertNotNull("The peer challenge should receive a signed response", outgoingResponse)
+        assertTrue(PeerIdentityProtocol.verify(outgoingResponse!!, peerAuthenticator))
+        assertFalse("One-way challenge must not authenticate the remote endpoint", router.authenticatedPeerIdentities.value.containsKey("peer_mutual"))
+
+        val ourChallenge = transport.transmittedPayloads
+            .mapNotNull { (_, payload) -> PeerIdentityProtocol.parse(payload) }
+            .filterIsInstance<PeerIdentityMessage.Challenge>()
+            .firstOrNull()
+        assertNotNull(ourChallenge)
+        val validRemoteResponse = PeerIdentityProtocol.createResponse(peerAuthenticator, ourChallenge!!.nonce)
+        router.handleIncomingPayload(validRemoteResponse.toJson(), "peer_mutual")
+
+        assertEquals(peerAuthenticator.localIdentityId(), router.authenticatedPeerIdentities.value["peer_mutual"])
+    }
+
+    @Test
+    fun testUnAuthenticatedPeerCannotInjectSignedRelayPacket() = runBlocking {
+        val dao = InMemoryDao()
+        val outbox = InMemoryOutboxDao()
+        val transport = MockTransport()
+        val router = MeshRouter("node_gate", dao, outbox, transport, eventAuthenticator = peerAuthenticator)
+        transport.peers.value = listOf(
+            DiscoveredPeer("untrusted_endpoint", "Untrusted", PeerConnectionStatus.CONNECTED)
+        )
+        val event = EventEntity(
+            id = "evt_inject_blocked",
+            localAuthorId = testAuthenticator.localIdentityId(),
+            displayName = "Origin",
+            createdAt = System.currentTimeMillis(),
+            eventType = EventType.ROOT_THREAD,
+            rootThreadId = "evt_inject_blocked",
+            text = "امضای رویداد معتبر است اما اتصال ناشناس است",
+            publishScope = PublishScope.MESH_PUBLIC
+        )
+        val packet = RelayPacket.fromEvent(event, "origin_node", signature = testAuthenticator.sign(event))
+
+        router.handleIncomingPayload(packet.toJson(), "untrusted_endpoint")
+
+        assertNull(dao.getEventById(event.id))
+        assertEquals(1, router.stats.value.packetsDroppedSignature)
+    }
+
+    @Test
     fun testApplicationLevelAckTransmissionAndProcessing() = runBlocking {
         val daoB = InMemoryDao()
         val outboxB = InMemoryOutboxDao()
         val transportB = MockTransport()
-        val routerB = MeshRouter("node_B", daoB, outboxB, transportB, eventAuthenticator = testAuthenticator)
+        val routerB = MeshRouter("node_B", daoB, outboxB, transportB, eventAuthenticator = peerAuthenticator)
 
         val event = EventEntity(
             id = "evt_ack_test",
@@ -347,8 +500,10 @@ class MultiHopStoreAndForwardTest {
         )
         val packet = RelayPacket.fromEvent(event, "node_A", signature = testAuthenticator.sign(event))
 
-        // Node B receives packet from conn_A
-        routerB.processIncomingPacket(packet.toJson(), fromEndpointId = "conn_A")
+        // Node B must authenticate conn_A before handling the signed relay envelope.
+        authenticatePeer(routerB, transportB, "conn_A", testAuthenticator)
+        transportB.transmittedPayloads.clear()
+        routerB.handleIncomingPayload(packet.toJson(), fromEndpointId = "conn_A")
 
         // Verify Node B sent an application ACK back to conn_A
         assertEquals(1, routerB.stats.value.acksSent)
@@ -359,13 +514,14 @@ class MultiHopStoreAndForwardTest {
         val ack = AckPacket.fromJson(payload)
         assertNotNull(ack)
         assertEquals(packet.packetId, ack?.packetId)
-        assertEquals(testAuthenticator.localIdentityId(), ack?.ackFromNodeId)
+        assertEquals(peerAuthenticator.localIdentityId(), ack?.ackFromNodeId)
         assertEquals(AckPacket.STATUS_STORED, ack?.status)
 
         // Now test Node A processing this ACK
         val daoA = InMemoryDao()
         val outboxA = InMemoryOutboxDao()
-        val routerA = MeshRouter("node_A", daoA, outboxA, null, eventAuthenticator = testAuthenticator)
+        val transportA = MockTransport()
+        val routerA = MeshRouter("node_A", daoA, outboxA, transportA, eventAuthenticator = testAuthenticator)
         outboxA.insertOutboxItem(
             OutboxEntity(
                 packetId = packet.packetId,
@@ -377,6 +533,7 @@ class MultiHopStoreAndForwardTest {
             )
         )
 
+        authenticatePeer(routerA, transportA, "conn_B", peerAuthenticator)
         routerA.handleIncomingAck(ack!!, fromEndpointId = "conn_B")
         assertEquals(1, routerA.stats.value.acksReceived)
 

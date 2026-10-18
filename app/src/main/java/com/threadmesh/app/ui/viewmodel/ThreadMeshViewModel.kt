@@ -59,6 +59,10 @@ class ThreadMeshViewModel(
     val meshRelayLog: StateFlow<List<String>> =
         meshRouter?.relayLog ?: MutableStateFlow(emptyList<String>()).asStateFlow()
 
+    /** Endpoint IDs whose remote signing-key fingerprints passed a fresh challenge-response. */
+    val authenticatedPeerIdentities: StateFlow<Map<String, String>> =
+        meshRouter?.authenticatedPeerIdentities ?: MutableStateFlow(emptyMap<String, String>()).asStateFlow()
+
     private val _displayName = MutableStateFlow("کاربر محلی")
     val displayName: StateFlow<String> = _displayName.asStateFlow()
 
