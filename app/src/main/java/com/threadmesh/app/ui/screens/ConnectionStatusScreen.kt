@@ -414,7 +414,7 @@ private fun DiagnosticMetric(label: String, value: String, modifier: Modifier = 
             text = value,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
-            color = Indigo700
+            color = Indigo600
         )
         Text(
             text = label,
