@@ -24,6 +24,8 @@ data class EventSignature(
 interface EventAuthenticator {
     /** Stable author identity derived from this installation's public signing key. */
     fun localIdentityId(): String
+    fun signPayload(payload: ByteArray): EventSignature
+    fun verifyPayload(payload: ByteArray, signature: EventSignature?): Boolean
     fun sign(event: EventEntity): EventSignature
     fun verify(event: EventEntity, signature: EventSignature?): Boolean
 }
@@ -68,9 +70,12 @@ object EventSignatureCodec {
             .joinToString("") { b -> "%02x".format(b.toInt() and 0xff) }
 
     fun verify(event: EventEntity, signature: EventSignature?): Boolean {
+        if (signature == null || event.localAuthorId != signature.signerKeyId) return false
+        return verifyPayload(canonicalBytes(event), signature)
+    }
+
+    fun verifyPayload(payload: ByteArray, signature: EventSignature?): Boolean {
         if (signature == null || signature.algorithm != ALGORITHM) return false
-        // The author's identity is the fingerprint of the public key, preventing arbitrary ID spoofing.
-        if (event.localAuthorId != signature.signerKeyId) return false
         return try {
             if (signature.publicKeyBase64.length > 2048 || signature.signatureBase64.length > 1024) return false
             val publicBytes = Base64.getDecoder().decode(signature.publicKeyBase64)
@@ -82,7 +87,7 @@ object EventSignatureCodec {
             val publicKey = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(publicBytes))
             Signature.getInstance(ALGORITHM).run {
                 initVerify(publicKey)
-                update(canonicalBytes(event))
+                update(payload)
                 verify(signatureBytes)
             }
         } catch (_: Exception) {

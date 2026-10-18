@@ -20,10 +20,13 @@ class EventSignatureTest {
             initialize(ECGenParameterSpec("secp256r1"))
         }.generateKeyPair()
 
-        override fun sign(event: EventEntity): EventSignature {
+        override fun sign(event: EventEntity): EventSignature =
+            signPayload(EventSignatureCodec.canonicalBytes(event))
+
+        override fun signPayload(payload: ByteArray): EventSignature {
             val signer = Signature.getInstance(EventSignatureCodec.ALGORITHM)
             signer.initSign(pair.private)
-            signer.update(EventSignatureCodec.canonicalBytes(event))
+            signer.update(payload)
             val publicBytes = pair.public.encoded
             return EventSignature(
                 algorithm = EventSignatureCodec.ALGORITHM,
@@ -33,6 +36,9 @@ class EventSignatureTest {
                 signedAt = System.currentTimeMillis()
             )
         }
+
+        override fun verifyPayload(payload: ByteArray, signature: EventSignature?): Boolean =
+            EventSignatureCodec.verifyPayload(payload, signature)
 
         override fun localIdentityId(): String = EventSignatureCodec.keyId(pair.public.encoded)
 
@@ -77,4 +83,13 @@ class EventSignatureTest {
         val signature = authenticator.sign(event).copy(signerKeyId = "00")
         assertFalse(authenticator.verify(event, signature))
     }
+
+    @Test
+    fun detachedPayloadSignatureRejectsChangedPayload() {
+        val original = "packet-123|event-456|STORED".toByteArray(Charsets.UTF_8)
+        val signature = authenticator.signPayload(original)
+        assertTrue(authenticator.verifyPayload(original, signature))
+        assertFalse(authenticator.verifyPayload("packet-123|event-999|STORED".toByteArray(Charsets.UTF_8), signature))
+    }
+
 }

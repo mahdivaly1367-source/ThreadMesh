@@ -3,6 +3,8 @@ package com.threadmesh.app.data.model
 import org.json.JSONArray
 import org.json.JSONObject
 import com.threadmesh.app.security.EventSignature
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 
 /**
  * Encapsulates an acknowledgment packet sent back from receiving node to transmitting peer
@@ -13,7 +15,8 @@ data class AckPacket(
     val eventId: String,
     val ackFromNodeId: String,
     val status: String = STATUS_STORED, // STORED or DUPLICATE
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val signature: EventSignature? = null
 ) {
     companion object {
         const val TYPE = "MESH_ACK"
@@ -29,12 +32,41 @@ data class AckPacket(
                     eventId = json.getString("eventId"),
                     ackFromNodeId = json.getString("ackFromNodeId"),
                     status = json.optString("status", STATUS_STORED),
-                    timestamp = json.optLong("timestamp", System.currentTimeMillis())
+                    timestamp = json.optLong("timestamp", System.currentTimeMillis()),
+                    signature = json.optJSONObject("ackSignature")?.let {
+                        EventSignature(
+                            algorithm = it.optString("algorithm", ""),
+                            signerKeyId = it.optString("signerKeyId", ""),
+                            publicKeyBase64 = it.optString("publicKeyBase64", ""),
+                            signatureBase64 = it.optString("signatureBase64", ""),
+                            signedAt = it.optLong("signedAt", 0L)
+                        )
+                    }
                 )
             } catch (_: Exception) {
                 null
             }
         }
+    }
+
+    /** Canonical bytes exclude the signature so the exact same bytes are verified by the receiver. */
+    fun canonicalBytes(): ByteArray {
+        val output = ByteArrayOutputStream()
+        DataOutputStream(output).use { out ->
+            out.writeInt(1)
+            writeField(out, packetId)
+            writeField(out, eventId)
+            writeField(out, ackFromNodeId)
+            writeField(out, status)
+            out.writeLong(timestamp)
+        }
+        return output.toByteArray()
+    }
+
+    private fun writeField(out: DataOutputStream, value: String) {
+        val bytes = value.toByteArray(Charsets.UTF_8)
+        out.writeInt(bytes.size)
+        out.write(bytes)
     }
 
     fun toJson(): String {
@@ -45,6 +77,16 @@ data class AckPacket(
             put("ackFromNodeId", ackFromNodeId)
             put("status", status)
             put("timestamp", timestamp)
+            val signatureJson = signature?.let {
+                JSONObject().apply {
+                    put("algorithm", it.algorithm)
+                    put("signerKeyId", it.signerKeyId)
+                    put("publicKeyBase64", it.publicKeyBase64)
+                    put("signatureBase64", it.signatureBase64)
+                    put("signedAt", it.signedAt)
+                }
+            }
+            put("ackSignature", signatureJson ?: JSONObject.NULL)
         }.toString()
     }
 }

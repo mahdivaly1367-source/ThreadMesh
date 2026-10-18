@@ -39,7 +39,8 @@ data class RecentChangeEventItem(
 class ThreadMeshRepository(
     private val dao: ThreadMeshDao,
     private val outboxDao: OutboxDao? = null,
-    private val eventAuthenticator: EventAuthenticator? = null
+    private val eventAuthenticator: EventAuthenticator? = null,
+    private val localNodeId: String? = null
 ) {
 
     val rootThreadsFlow: Flow<List<EventEntity>> = dao.getAllRootThreadsFlow()
@@ -91,7 +92,7 @@ class ThreadMeshRepository(
             val authenticator = eventAuthenticator ?: return
             val packet = RelayPacket.fromEvent(
                 event,
-                originNodeId = event.localAuthorId,
+                originNodeId = localNodeId?.takeIf { it.isNotBlank() } ?: event.localAuthorId,
                 signature = authenticator.sign(event)
             )
             val outboxItem = OutboxEntity(

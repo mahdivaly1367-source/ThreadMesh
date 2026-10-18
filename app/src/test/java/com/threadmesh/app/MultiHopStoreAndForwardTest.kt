@@ -44,10 +44,13 @@ class MultiHopStoreAndForwardTest {
             initialize(ECGenParameterSpec("secp256r1"))
         }.generateKeyPair()
 
-        override fun sign(event: EventEntity): EventSignature {
+        override fun sign(event: EventEntity): EventSignature =
+            signPayload(EventSignatureCodec.canonicalBytes(event))
+
+        override fun signPayload(payload: ByteArray): EventSignature {
             val signer = Signature.getInstance(EventSignatureCodec.ALGORITHM)
             signer.initSign(pair.private)
-            signer.update(EventSignatureCodec.canonicalBytes(event))
+            signer.update(payload)
             val publicBytes = pair.public.encoded
             return EventSignature(
                 algorithm = EventSignatureCodec.ALGORITHM,
@@ -57,6 +60,9 @@ class MultiHopStoreAndForwardTest {
                 signedAt = System.currentTimeMillis()
             )
         }
+
+        override fun verifyPayload(payload: ByteArray, signature: EventSignature?): Boolean =
+            EventSignatureCodec.verifyPayload(payload, signature)
 
         override fun localIdentityId(): String = EventSignatureCodec.keyId(pair.public.encoded)
 
@@ -317,7 +323,7 @@ class MultiHopStoreAndForwardTest {
         val ack = AckPacket.fromJson(payload)
         assertNotNull(ack)
         assertEquals(packet.packetId, ack?.packetId)
-        assertEquals("node_B", ack?.ackFromNodeId)
+        assertEquals(testAuthenticator.localIdentityId(), ack?.ackFromNodeId)
         assertEquals(AckPacket.STATUS_STORED, ack?.status)
 
         // Now test Node A processing this ACK
@@ -547,6 +553,49 @@ class MultiHopStoreAndForwardTest {
         assertTrue(result.isFailure)
         assertNull(dao.getEventById(event.id))
         assertEquals(1, router.stats.value.packetsDroppedMalformedRoute)
+    }
+
+
+    @Test
+    fun testTamperedAckCannotMarkPacketDelivered() = runBlocking {
+        val dao = InMemoryDao()
+        val outbox = InMemoryOutboxDao()
+        val router = MeshRouter("node_A", dao, outbox, null, eventAuthenticator = testAuthenticator)
+        val event = EventEntity(
+            id = "evt_ack_tamper",
+            localAuthorId = testAuthenticator.localIdentityId(),
+            displayName = "A",
+            createdAt = System.currentTimeMillis(),
+            eventType = EventType.ROOT_THREAD,
+            rootThreadId = "evt_ack_tamper",
+            text = "تست ACK دستکاری‌شده",
+            publishScope = PublishScope.MESH_PUBLIC
+        )
+        val packet = RelayPacket.fromEvent(event, "node_A", signature = testAuthenticator.sign(event))
+        outbox.insertOutboxItem(
+            OutboxEntity(
+                packetId = packet.packetId,
+                eventId = event.id,
+                rawJson = packet.toJson(),
+                status = OutboxStatus.PENDING,
+                hopCount = packet.hopCount,
+                expiresAt = packet.expiresAt
+            )
+        )
+        val unsigned = AckPacket(
+            packetId = packet.packetId,
+            eventId = event.id,
+            ackFromNodeId = testAuthenticator.localIdentityId(),
+            status = AckPacket.STATUS_STORED
+        )
+        val signed = unsigned.copy(signature = testAuthenticator.signPayload(unsigned.canonicalBytes()))
+        val tampered = signed.copy(eventId = "evt_other")
+
+        router.handleIncomingAck(tampered, fromEndpointId = "conn_B")
+
+        assertEquals(0, router.stats.value.acksReceived)
+        assertFalse(outbox.getByPacketId(packet.packetId)!!.hasDeliveredTo("conn_B"))
+        assertEquals(1, router.stats.value.packetsDroppedSignature)
     }
 
 }

@@ -16,11 +16,14 @@ class AndroidKeystoreEventAuthenticator : EventAuthenticator {
         private const val KEY_ALIAS = "threadmesh.event-signing.ec.v1"
     }
 
-    override fun sign(event: EventEntity): EventSignature {
+    override fun sign(event: EventEntity): EventSignature =
+        signPayload(EventSignatureCodec.canonicalBytes(event))
+
+    override fun signPayload(payload: ByteArray): EventSignature {
         val pair = loadOrCreateKeyPair()
         val signer = Signature.getInstance(EventSignatureCodec.ALGORITHM)
         signer.initSign(pair.private)
-        signer.update(EventSignatureCodec.canonicalBytes(event))
+        signer.update(payload)
         val publicBytes = pair.public.encoded
         return EventSignature(
             algorithm = EventSignatureCodec.ALGORITHM,
@@ -32,6 +35,9 @@ class AndroidKeystoreEventAuthenticator : EventAuthenticator {
     }
 
     override fun localIdentityId(): String = EventSignatureCodec.keyId(loadOrCreateKeyPair().public.encoded)
+
+    override fun verifyPayload(payload: ByteArray, signature: EventSignature?): Boolean =
+        EventSignatureCodec.verifyPayload(payload, signature)
 
     override fun verify(event: EventEntity, signature: EventSignature?): Boolean =
         EventSignatureCodec.verify(event, signature)

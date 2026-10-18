@@ -42,23 +42,25 @@ class MainActivity : ComponentActivity() {
 
         val database = AppDatabase.getDatabase(applicationContext)
         val eventAuthenticator = AndroidKeystoreEventAuthenticator()
-        val repository = ThreadMeshRepository(
-            database.threadMeshDao(),
-            database.outboxDao(),
-            eventAuthenticator
-        )
         val transport = try {
             GoogleNearbyTransport(applicationContext)
         } catch (_: Exception) {
             null
         }
 
-        // Persist the node identity so the relay loop-prevention path survives app restarts.
+        // Persist the node identity so relay-loop checks and initial packet paths use the same stable ID.
         val identityPreferences = getSharedPreferences("threadmesh_identity", MODE_PRIVATE)
         val localNodeId = identityPreferences.getString("local_node_id", null)
             ?: UUID.randomUUID().toString().also { generatedId ->
                 identityPreferences.edit().putString("local_node_id", generatedId).apply()
             }
+
+        val repository = ThreadMeshRepository(
+            database.threadMeshDao(),
+            database.outboxDao(),
+            eventAuthenticator,
+            localNodeId
+        )
 
         val viewModel = ViewModelProvider(this, object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T {

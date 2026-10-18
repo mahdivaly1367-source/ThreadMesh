@@ -151,13 +151,39 @@ class MeshRouter(
      * Handles receipt of an application-level ACK confirming successful storage in destination node.
      */
     suspend fun handleIncomingAck(ack: AckPacket, fromEndpointId: String) {
-        _stats.update { it.copy(acksReceived = it.acksReceived + 1) }
-        // Outbox delivery deduplication uses Nearby endpoint IDs, not logical node IDs.
-        val peerIdentifier = if (fromEndpointId.isNotBlank()) fromEndpointId else ack.ackFromNodeId
-        log("تأییدیه دریافت و ذخیره در گره مقصد (ACK) از $peerIdentifier برای بسته ${ack.packetId} دریافت شد (وضعیت: ${ack.status}).")
+        val authenticator = eventAuthenticator
+        val signature = ack.signature
+        if (
+            authenticator == null ||
+            signature == null ||
+            ack.ackFromNodeId != signature.signerKeyId ||
+            !authenticator.verifyPayload(ack.canonicalBytes(), signature)
+        ) {
+            _stats.update { it.copy(packetsDroppedSignature = it.packetsDroppedSignature + 1) }
+            log("تأییدیهٔ دریافت به‌دلیل امضای نامعتبر رد شد.")
+            return
+        }
+        if (ack.status != AckPacket.STATUS_STORED && ack.status != AckPacket.STATUS_DUPLICATE) {
+            _stats.update { it.copy(packetsDroppedMalformedRoute = it.packetsDroppedMalformedRoute + 1) }
+            log("تأییدیه با وضعیت ناشناخته رد شد.")
+            return
+        }
+        if (fromEndpointId.isBlank()) {
+            _stats.update { it.copy(packetsDroppedMalformedRoute = it.packetsDroppedMalformedRoute + 1) }
+            log("تأییدیه بدون شناسهٔ اتصال معتبر رد شد.")
+            return
+        }
+        val outgoing = outboxDao.getByPacketId(ack.packetId)
+        if (outgoing == null || outgoing.eventId != ack.eventId) {
+            _stats.update { it.copy(packetsDroppedMalformedRoute = it.packetsDroppedMalformedRoute + 1) }
+            log("تأییدیه‌ای که با بستهٔ ارسالی تطبیق ندارد رد شد.")
+            return
+        }
 
-        // Record confirmed delivery for this specific peer without depriving other future peers!
-        outboxDao.recordConfirmedPeerDelivery(ack.packetId, peerIdentifier)
+        _stats.update { it.copy(acksReceived = it.acksReceived + 1) }
+        // Record by the exact Nearby endpoint ID used by sendMeshPayload.
+        log("تأییدیهٔ امضاشده از $fromEndpointId برای بسته ${ack.packetId} دریافت شد.")
+        outboxDao.recordConfirmedPeerDelivery(ack.packetId, fromEndpointId)
     }
 
     /**
@@ -281,15 +307,21 @@ class MeshRouter(
 
     private fun sendAck(toEndpointId: String, packetId: String, eventId: String, status: String) {
         if (toEndpointId.isBlank() || transport == null) return
-        val ack = AckPacket(
+        val authenticator = eventAuthenticator ?: return
+        val unsignedAck = AckPacket(
             packetId = packetId,
             eventId = eventId,
-            ackFromNodeId = localNodeId,
+            ackFromNodeId = authenticator.localIdentityId(),
             status = status
         )
-        transport.sendMeshPayload(toEndpointId, ack.toJson())
-        _stats.update { it.copy(acksSent = it.acksSent + 1) }
-        log("تأییدیه دریافت (ACK) به همتای $toEndpointId ارسال شد.")
+        val ack = unsignedAck.copy(signature = authenticator.signPayload(unsignedAck.canonicalBytes()))
+        val result = transport.sendMeshPayload(toEndpointId, ack.toJson())
+        if (result.isSuccess) {
+            _stats.update { it.copy(acksSent = it.acksSent + 1) }
+            log("تأییدیهٔ امضاشده به همتای $toEndpointId ارسال شد.")
+        } else {
+            log("ارسال تأییدیه به همتای $toEndpointId ناموفق بود؛ دریافت‌کننده می‌تواند در ارسال بعدی تلاش کند.")
+        }
     }
 
     /**
