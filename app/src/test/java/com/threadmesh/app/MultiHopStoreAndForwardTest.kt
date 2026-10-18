@@ -364,6 +364,7 @@ class MultiHopStoreAndForwardTest {
         // Packet that has already passed through node_A and node_B and is now sent back to node_A
         val loopedPacket = RelayPacket(
             packetId = "pkt_evt_loop_1_2",
+            relayedByNodeId = "node_C",
             event = event,
             signature = testAuthenticator.sign(event),
             hopCount = 2,
@@ -398,6 +399,7 @@ class MultiHopStoreAndForwardTest {
         // Packet reached hopCount 3 with maxHops 3
         val maxedPacket = RelayPacket(
             packetId = "pkt_evt_max_hops_3",
+            relayedByNodeId = "node_E",
             event = event,
             signature = testAuthenticator.sign(event),
             hopCount = 3,
@@ -432,6 +434,7 @@ class MultiHopStoreAndForwardTest {
 
         val expiredPacket = RelayPacket(
             packetId = "pkt_evt_stale_1",
+            relayedByNodeId = "node_D",
             event = staleEvent,
             signature = testAuthenticator.sign(staleEvent),
             hopCount = 1,
