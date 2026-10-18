@@ -48,6 +48,9 @@ interface OutboxDao {
     @Query("UPDATE mesh_outbox SET status = 'EXPIRED' WHERE expiresAt <= :now AND status = 'PENDING'")
     suspend fun markExpiredPackets(now: Long = System.currentTimeMillis())
 
+    @Query("UPDATE mesh_outbox SET status = 'DROPPED' WHERE packetId = :packetId AND status = 'PENDING'")
+    suspend fun markDroppedPacket(packetId: String)
+
     @Query("SELECT COUNT(*) FROM mesh_outbox WHERE status = 'PENDING'")
     fun getPendingCountFlow(): Flow<Int>
 

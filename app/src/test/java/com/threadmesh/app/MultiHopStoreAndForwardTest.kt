@@ -131,6 +131,11 @@ class MultiHopStoreAndForwardTest {
             }
         }
 
+        override suspend fun markDroppedPacket(packetId: String) {
+            val item = outbox[packetId] ?: return
+            outbox[packetId] = item.copy(status = OutboxStatus.DROPPED)
+        }
+
         override fun getPendingCountFlow() = flowOf(outbox.values.count { it.status == OutboxStatus.PENDING })
         override fun getRelayedCountFlow() = flowOf(outbox.values.count { it.relayedToPeersCount > 0 })
         override fun getAllOutboxFlow() = flowOf(outbox.values.toList())
@@ -358,12 +363,12 @@ class MultiHopStoreAndForwardTest {
 
         // Packet that has already passed through node_A and node_B and is now sent back to node_A
         val loopedPacket = RelayPacket(
-            packetId = "pkt_loop",
+            packetId = "pkt_evt_loop_1_2",
             event = event,
             signature = testAuthenticator.sign(event),
             hopCount = 2,
             maxHops = 5,
-            visitedNodeIds = listOf("node_A", "node_B")
+            visitedNodeIds = listOf("node_A", "node_B", "node_C")
         )
 
         val res = router.processIncomingPacket(loopedPacket.toJson())
@@ -392,12 +397,12 @@ class MultiHopStoreAndForwardTest {
 
         // Packet reached hopCount 3 with maxHops 3
         val maxedPacket = RelayPacket(
-            packetId = "pkt_maxed",
+            packetId = "pkt_evt_max_hops_3",
             event = event,
             signature = testAuthenticator.sign(event),
             hopCount = 3,
             maxHops = 3,
-            visitedNodeIds = listOf("node_A", "node_B")
+            visitedNodeIds = listOf("node_A", "node_B", "node_D", "node_E")
         )
 
         val res = router.processIncomingPacket(maxedPacket.toJson())
@@ -426,12 +431,12 @@ class MultiHopStoreAndForwardTest {
         )
 
         val expiredPacket = RelayPacket(
-            packetId = "pkt_exp",
+            packetId = "pkt_evt_stale_1",
             event = staleEvent,
             signature = testAuthenticator.sign(staleEvent),
             hopCount = 1,
             maxHops = 5,
-            visitedNodeIds = listOf("node_A"),
+            visitedNodeIds = listOf("node_A", "node_D"),
             expiresAt = System.currentTimeMillis() - 5000 // Already expired in past
         )
 
@@ -466,7 +471,7 @@ class MultiHopStoreAndForwardTest {
 
         // Incoming packet pretending to have LOCAL_ONLY must be rejected
         val fakePacket = RelayPacket(
-            packetId = "pkt_fake",
+            packetId = "pkt_evt_local_0",
             event = localOnlyEvent,
             signature = testAuthenticator.sign(localOnlyEvent),
             hopCount = 0,
@@ -476,4 +481,69 @@ class MultiHopStoreAndForwardTest {
         val incomingRes = router.processIncomingPacket(fakePacket.toJson())
         assertTrue(incomingRes.isFailure)
     }
+
+    @Test
+    fun testTamperedEventContentIsRejectedBeforePersistence() = runBlocking {
+        val dao = InMemoryDao()
+        val outbox = InMemoryOutboxDao()
+        val router = MeshRouter("node_B", dao, outbox, null, eventAuthenticator = testAuthenticator)
+        val original = EventEntity(
+            id = "evt_tamper",
+            localAuthorId = testAuthenticator.localIdentityId(),
+            displayName = "A",
+            createdAt = System.currentTimeMillis(),
+            eventType = EventType.ROOT_THREAD,
+            rootThreadId = "evt_tamper",
+            text = "متن اصلی",
+            publishScope = PublishScope.MESH_PUBLIC
+        )
+        val signature = testAuthenticator.sign(original)
+        val tampered = original.copy(text = "متن دستکاری‌شده")
+        val packet = RelayPacket(
+            packetId = "pkt_evt_tamper_0",
+            event = tampered,
+            signature = signature,
+            hopCount = 0,
+            maxHops = 5,
+            visitedNodeIds = listOf("node_A")
+        )
+
+        val result = router.processIncomingPacket(packet.toJson())
+
+        assertTrue(result.isFailure)
+        assertNull(dao.getEventById(tampered.id))
+        assertEquals(1, router.stats.value.packetsDroppedSignature)
+    }
+
+    @Test
+    fun testMalformedRoutingHeaderIsRejected() = runBlocking {
+        val dao = InMemoryDao()
+        val outbox = InMemoryOutboxDao()
+        val router = MeshRouter("node_C", dao, outbox, null, eventAuthenticator = testAuthenticator)
+        val event = EventEntity(
+            id = "evt_bad_route",
+            localAuthorId = testAuthenticator.localIdentityId(),
+            displayName = "A",
+            createdAt = System.currentTimeMillis(),
+            eventType = EventType.ROOT_THREAD,
+            rootThreadId = "evt_bad_route",
+            text = "مسیر خراب",
+            publishScope = PublishScope.MESH_PUBLIC
+        )
+        val packet = RelayPacket(
+            packetId = "pkt_evt_bad_route_0",
+            event = event,
+            signature = testAuthenticator.sign(event),
+            hopCount = 0,
+            maxHops = 5,
+            visitedNodeIds = listOf("node_A", "node_B")
+        )
+
+        val result = router.processIncomingPacket(packet.toJson())
+
+        assertTrue(result.isFailure)
+        assertNull(dao.getEventById(event.id))
+        assertEquals(1, router.stats.value.packetsDroppedMalformedRoute)
+    }
+
 }

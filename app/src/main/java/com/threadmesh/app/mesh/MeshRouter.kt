@@ -30,7 +30,8 @@ data class MeshRouterStats(
     val packetsDroppedExpired: Int = 0,
     val packetsDroppedDuplicate: Int = 0,
     val packetsDroppedScope: Int = 0,
-    val packetsDroppedSignature: Int = 0
+    val packetsDroppedSignature: Int = 0,
+    val packetsDroppedMalformedRoute: Int = 0
 )
 
 class MeshRouter(
@@ -197,6 +198,13 @@ class MeshRouter(
             return Result.failure(SecurityException("امضای رویداد نامعتبر است."))
         }
 
+        // Route header fields can be altered in transit, so validate their bounds independently.
+        if (!packet.hasValidRoutingMetadata()) {
+            _stats.update { it.copy(packetsDroppedMalformedRoute = it.packetsDroppedMalformedRoute + 1) }
+            log("بسته به‌دلیل ناسازگاری شناسه، مسیر، شمارش پرش یا محدودیت عمر رد شد.")
+            return Result.failure(IllegalArgumentException("فرادادهٔ مسیریابی نامعتبر است."))
+        }
+
         // 2. Expiration check
         if (packet.isExpired()) {
             _stats.update { it.copy(packetsDroppedExpired = it.packetsDroppedExpired + 1) }
@@ -300,11 +308,31 @@ class MeshRouter(
      */
     suspend fun flushOutboxToPeer(peerEndpointId: String): Int {
         val now = System.currentTimeMillis()
+        outboxDao.markExpiredPackets(now)
         val pending = outboxDao.getPendingPackets(now)
         var relayedCount = 0
 
         for (item in pending) {
-            val packet = runCatching { RelayPacket.fromJson(item.rawJson) }.getOrNull() ?: continue
+            val packet = runCatching { RelayPacket.fromJson(item.rawJson) }.getOrNull()
+            if (packet == null) {
+                outboxDao.markDroppedPacket(item.packetId)
+                log("بستهٔ خراب ${item.packetId} از صف انتقال کنار گذاشته شد.")
+                continue
+            }
+
+            val authenticator = eventAuthenticator
+            if (authenticator == null || !authenticator.verify(packet.event, packet.signature)) {
+                outboxDao.markDroppedPacket(item.packetId)
+                _stats.update { it.copy(packetsDroppedSignature = it.packetsDroppedSignature + 1) }
+                log("بستهٔ بدون امضای معتبر از صف انتقال کنار گذاشته شد.")
+                continue
+            }
+            if (!packet.hasValidRoutingMetadata(now)) {
+                outboxDao.markDroppedPacket(item.packetId)
+                _stats.update { it.copy(packetsDroppedMalformedRoute = it.packetsDroppedMalformedRoute + 1) }
+                log("بستهٔ دارای فرادادهٔ مسیریابی نامعتبر از صف انتقال کنار گذاشته شد.")
+                continue
+            }
 
             // 1. Skip if this specific peer was already confirmed as delivered
             if (item.hasDeliveredTo(peerEndpointId)) {

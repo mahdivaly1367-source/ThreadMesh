@@ -66,7 +66,7 @@ data class RelayPacket(
     val hopCount: Int = 0,
     val maxHops: Int = DEFAULT_MAX_HOPS,
     val visitedNodeIds: List<String> = emptyList(),
-    val expiresAt: Long = System.currentTimeMillis() + DEFAULT_TTL_MILLIS,
+    val expiresAt: Long = event.createdAt + DEFAULT_TTL_MILLIS,
     val relayedByNodeId: String = "",
     val relayedAt: Long = System.currentTimeMillis()
 ) {
@@ -90,7 +90,7 @@ data class RelayPacket(
                 hopCount = 0,
                 maxHops = maxHops,
                 visitedNodeIds = listOf(originNodeId),
-                expiresAt = now + ttlMillis,
+                expiresAt = event.createdAt + ttlMillis,
                 relayedByNodeId = originNodeId,
                 relayedAt = now
             )
@@ -145,7 +145,28 @@ data class RelayPacket(
         }
     }
 
-    fun isExpired(currentTime: Long = System.currentTimeMillis()): Boolean = currentTime > expiresAt
+    /**
+     * Validate mutable relay metadata before trusting it. The origin signature covers the event;
+     * these bounds prevent malformed packets from bypassing hop/TTL controls with absurd headers.
+     */
+    fun hasValidRoutingMetadata(
+        currentTime: Long = System.currentTimeMillis(),
+        maxAllowedHops: Int = DEFAULT_MAX_HOPS
+    ): Boolean {
+        if (maxHops !in 0..maxAllowedHops) return false
+        if (hopCount !in 0..maxHops) return false
+        if (packetId != "pkt_${event.id}_${hopCount}") return false
+        if (visitedNodeIds.size != hopCount + 1) return false
+        if (visitedNodeIds.any { it.isBlank() }) return false
+        if (visitedNodeIds.distinct().size != visitedNodeIds.size) return false
+        if (relayedByNodeId.isBlank() || relayedByNodeId != visitedNodeIds.lastOrNull()) return false
+        if (event.createdAt > currentTime + 5 * 60 * 1000L) return false
+        if (expiresAt <= event.createdAt) return false
+        if (expiresAt > event.createdAt + DEFAULT_TTL_MILLIS) return false
+        return true
+    }
+
+    fun isExpired(currentTime: Long = System.currentTimeMillis()): Boolean = currentTime >= expiresAt
 
     fun canForward(localNodeId: String): Boolean {
         // Must be MESH_PUBLIC
