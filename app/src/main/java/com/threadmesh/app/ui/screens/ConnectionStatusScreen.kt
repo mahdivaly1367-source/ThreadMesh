@@ -38,6 +38,8 @@ fun ConnectionStatusScreen(
     val peers by viewModel.discoveredPeers.collectAsState()
     val errorMsg by viewModel.meshError.collectAsState()
     val userMsg by viewModel.userMessage.collectAsState()
+    val routerStats by viewModel.meshRouterStats.collectAsState()
+    val relayLog by viewModel.meshRelayLog.collectAsState()
 
     var permissionsGranted by remember { mutableStateOf(false) }
     var permissionDeniedNotice by remember { mutableStateOf(false) }
@@ -307,6 +309,71 @@ fun ConnectionStatusScreen(
                 }
             }
 
+            // Live Router Diagnostics Card
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Slate200)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Analytics,
+                                contentDescription = null,
+                                tint = Indigo600,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "آمار زندهٔ موتور مش",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Slate900
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(modifier = Modifier.fillMaxWidth()) {
+                            DiagnosticMetric("دریافت‌شده", routerStats.packetsReceived.toString(), Modifier.weight(1f))
+                            DiagnosticMetric("ذخیره‌شده", routerStats.packetsStoredLocally.toString(), Modifier.weight(1f))
+                            DiagnosticMetric("ارسال‌شده", routerStats.packetsRelayed.toString(), Modifier.weight(1f))
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(modifier = Modifier.fillMaxWidth()) {
+                            DiagnosticMetric("ACK معتبر", routerStats.acksReceived.toString(), Modifier.weight(1f))
+                            DiagnosticMetric("رد امضا", routerStats.packetsDroppedSignature.toString(), Modifier.weight(1f))
+                            DiagnosticMetric("مسیر خراب", routerStats.packetsDroppedMalformedRoute.toString(), Modifier.weight(1f))
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "آخرین رویدادهای انتقال",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Slate700
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        if (relayLog.isEmpty()) {
+                            Text(
+                                text = "هنوز رویدادی از موتور مسیریابی ثبت نشده است.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Slate500
+                            )
+                        } else {
+                            relayLog.take(5).forEach { message ->
+                                Text(
+                                    text = "• $message",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Slate700,
+                                    lineHeight = 18.sp,
+                                    modifier = Modifier.padding(vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // Security & Scope Filter Notice
             item {
                 Card(
@@ -324,7 +391,7 @@ fun ConnectionStatusScreen(
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "۱. فقط رویدادهای با برچسب MESH_PUBLIC از این مسیر ارسال یا دریافت می‌شوند؛ یادداشت‌های LOCAL_ONLY هرگز از دستگاه خارج نخواهند شد.\n۲. رویدادهای تکراری به واسطهٔ شناسه یکتای UUID مجدداً ساخته نمی‌شوند.\n۳. چون در این فاز هنوز امضای رمزنگاری‌شده (Asymmetric Cryptographic Signature) پیاده نشده است، پیام‌ها قابل تأیید اصالت قطعی نیستند و نباید محصول امن نهایی قلمداد شود.",
+                            text = "۱. فقط رویدادهای MESH_PUBLIC از مسیر مش منتقل می‌شوند؛ LOCAL_ONLY و GLOBAL_PUBLIC مسدود هستند.\n۲. محتوای رویدادهای مش با ECDSA و کلید Android Keystore امضا می‌شود؛ گیرنده امضا را پیش از ذخیره بررسی می‌کند.\n۳. تأییدیهٔ دریافت (ACK) نیز امضا می‌شود و با شناسهٔ بسته و رویداد ارسالی تطبیق داده می‌شود.\n۴. هنوز مسیریابی رادیویی چندمرحله‌ای روی دستگاه‌های واقعی، عملکرد پیوسته در پس‌زمینه و اعتماد به هویت انسانیِ کلیدها به‌طور کامل اعتبارسنجی نشده‌اند.",
                             style = MaterialTheme.typography.bodySmall,
                             color = Slate600,
                             lineHeight = 22.sp
@@ -335,6 +402,28 @@ fun ConnectionStatusScreen(
         }
     }
 }
+
+
+@Composable
+private fun DiagnosticMetric(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier.padding(horizontal = 2.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = value,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = Indigo700
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = Slate500
+        )
+    }
+}
+
 
 @Composable
 fun PeerCard(

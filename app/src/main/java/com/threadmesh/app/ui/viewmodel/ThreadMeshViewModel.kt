@@ -8,6 +8,7 @@ import com.threadmesh.app.data.model.PublishScope
 import com.threadmesh.app.data.local.OutboxDao
 import com.threadmesh.app.data.local.ThreadMeshDao
 import com.threadmesh.app.mesh.MeshRouter
+import com.threadmesh.app.mesh.MeshRouterStats
 import com.threadmesh.app.security.EventAuthenticator
 import com.threadmesh.app.data.repository.RecentChangeEventItem
 import com.threadmesh.app.data.repository.ThreadListItem
@@ -50,6 +51,13 @@ class ThreadMeshViewModel(
     } else {
         null
     }
+
+    /** Live router diagnostics shown on the connection screen; empty defaults keep previews safe. */
+    val meshRouterStats: StateFlow<MeshRouterStats> =
+        meshRouter?.stats ?: MutableStateFlow(MeshRouterStats()).asStateFlow()
+
+    val meshRelayLog: StateFlow<List<String>> =
+        meshRouter?.relayLog ?: MutableStateFlow(emptyList<String>()).asStateFlow()
 
     private val _displayName = MutableStateFlow("کاربر محلی")
     val displayName: StateFlow<String> = _displayName.asStateFlow()
