@@ -10,7 +10,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.threadmesh.app.data.model.EventEntity
 import com.threadmesh.app.data.model.OutboxEntity
 
-@Database(entities = [EventEntity::class, OutboxEntity::class], version = 2, exportSchema = false)
+@Database(entities = [EventEntity::class, OutboxEntity::class], version = 3, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun threadMeshDao(): ThreadMeshDao
@@ -50,6 +50,14 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE `mesh_outbox` ADD COLUMN `peerAttemptTimes` TEXT NOT NULL DEFAULT '{}'"
+                )
+            }
+        }
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -59,7 +67,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "threadmesh_local.db"
-                ).addMigrations(MIGRATION_1_2).build()
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
                 INSTANCE = instance
                 instance
             }

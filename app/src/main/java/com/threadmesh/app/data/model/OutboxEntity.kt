@@ -3,6 +3,8 @@ package com.threadmesh.app.data.model
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import androidx.room.ColumnInfo
+import org.json.JSONObject
 
 enum class OutboxStatus {
     PENDING,        // Active and ready to be delivered to peers not yet in deliveredPeerIds
@@ -30,8 +32,22 @@ data class OutboxEntity(
     val createdAt: Long = System.currentTimeMillis(),
     val lastRelayAttemptAt: Long? = null,
     val relayedToPeersCount: Int = 0,
-    val deliveredPeerIds: String = "" // Comma-separated list of peer endpoint/node IDs confirmed to have received this packet
+    val deliveredPeerIds: String = "", // Comma-separated endpoint IDs confirmed to have received this packet
+    @ColumnInfo(defaultValue = "'{}'")
+    val peerAttemptTimes: String = "{}" // JSON object: endpoint ID -> last send attempt timestamp
 ) {
+    fun lastAttemptAtFor(peerId: String): Long {
+        if (peerId.isBlank() || peerAttemptTimes.isBlank()) return 0L
+        return runCatching { JSONObject(peerAttemptTimes).optLong(peerId, 0L) }.getOrDefault(0L)
+    }
+
+    fun withPeerAttempt(peerId: String, attemptedAt: Long): OutboxEntity {
+        if (peerId.isBlank()) return this
+        val attempts = runCatching { JSONObject(peerAttemptTimes) }.getOrElse { JSONObject() }
+        attempts.put(peerId, attemptedAt)
+        return copy(lastRelayAttemptAt = attemptedAt, peerAttemptTimes = attempts.toString())
+    }
+
     fun hasDeliveredTo(peerId: String): Boolean {
         if (deliveredPeerIds.isBlank() || peerId.isBlank()) return false
         val set = deliveredPeerIds.split(",").map { it.trim() }.filter { it.isNotEmpty() }

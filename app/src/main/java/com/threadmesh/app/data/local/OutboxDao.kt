@@ -40,7 +40,17 @@ interface OutboxDao {
     }
 
     /**
-     * Backward-compatible helper.
+     * Records a per-peer attempt atomically. A later retry to peer A must not suppress the
+     * first delivery to peer B, and updating this timestamp must preserve a concurrent ACK.
+     */
+    @Transaction
+    suspend fun recordPeerRelayAttempt(packetId: String, peerId: String, attemptTime: Long) {
+        val existing = getByPacketId(packetId) ?: return
+        updateOutboxItem(existing.withPeerAttempt(peerId, attemptTime))
+    }
+
+    /**
+     * Backward-compatible helper for successful transmission metrics.
      */
     @Query("UPDATE mesh_outbox SET lastRelayAttemptAt = :attemptTime, relayedToPeersCount = relayedToPeersCount + 1 WHERE packetId = :packetId")
     suspend fun markRelayed(packetId: String, attemptTime: Long = System.currentTimeMillis())

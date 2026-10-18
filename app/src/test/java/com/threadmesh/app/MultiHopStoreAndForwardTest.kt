@@ -118,6 +118,11 @@ class MultiHopStoreAndForwardTest {
             outbox[packetId] = updated
         }
 
+        override suspend fun recordPeerRelayAttempt(packetId: String, peerId: String, attemptTime: Long) {
+            val item = outbox[packetId] ?: return
+            outbox[packetId] = item.withPeerAttempt(peerId, attemptTime)
+        }
+
         override suspend fun markRelayed(packetId: String, attemptTime: Long) {
             val item = outbox[packetId]
             if (item != null) {
@@ -290,6 +295,37 @@ class MultiHopStoreAndForwardTest {
         // Second peer connects later: Peer D -> MUST receive the packet!
         val relayedToD = routerB.flushOutboxToPeer("peer_D")
         assertEquals(1, relayedToD)
+    }
+
+    @Test
+    fun testMissingAckRetryIsThrottledPerPeerButNotForNewPeers() = runBlocking {
+        val dao = InMemoryDao()
+        val outbox = InMemoryOutboxDao()
+        val transport = MockTransport()
+        val router = MeshRouter("node_retry", dao, outbox, transport, eventAuthenticator = testAuthenticator)
+        val event = EventEntity(
+            id = "evt_retry_1",
+            localAuthorId = testAuthenticator.localIdentityId(),
+            displayName = "گره آزمایشی",
+            createdAt = System.currentTimeMillis(),
+            eventType = EventType.ROOT_THREAD,
+            rootThreadId = "evt_retry_1",
+            text = "تست تلاش مجدد پس از گم‌شدن ACK",
+            publishScope = PublishScope.MESH_PUBLIC
+        )
+
+        router.enqueueForRelay(event)
+        assertEquals(1, router.flushOutboxToPeer("peer_A"))
+        assertEquals(0, router.flushOutboxToPeer("peer_A")) // ACK timeout has not elapsed.
+        assertEquals(1, router.flushOutboxToPeer("peer_B")) // Peer A must not block peer B.
+
+        val packet = outbox.getByEventId(event.id)!!
+        val backdated = packet.withPeerAttempt(
+            "peer_A",
+            System.currentTimeMillis() - MeshRouter.PEER_RETRY_INTERVAL_MILLIS - 1L
+        )
+        outbox.updateOutboxItem(backdated)
+        assertEquals(1, router.flushOutboxToPeer("peer_A")) // Retry after timeout.
     }
 
     @Test

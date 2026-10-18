@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import org.json.JSONObject
 
 data class MeshRouterStats(
@@ -48,6 +49,12 @@ class MeshRouter(
     private val _relayLog = MutableStateFlow<List<String>>(emptyList())
     val relayLog: StateFlow<List<String>> = _relayLog.asStateFlow()
 
+    companion object {
+        /** Wait before retrying the same packet to the same peer after a missing ACK. */
+        internal const val PEER_RETRY_INTERVAL_MILLIS = 30_000L
+        private const val RETRY_SCAN_INTERVAL_MILLIS = 5_000L
+    }
+
     init {
         if (transport != null) {
             // 1. Listen to raw transport payloads (RelayPacket and AckPacket)
@@ -63,6 +70,23 @@ class MeshRouter(
                     val newlyConnected = peerList.filter { it.status == PeerConnectionStatus.CONNECTED }
                     for (peer in newlyConnected) {
                         flushOutboxToPeer(peer.endpointId)
+                    }
+                }
+            }
+
+            // Keep retrying packets whose ACK was lost while the peer remains connected.
+            // Per-peer timestamps prevent a busy peer from blocking first delivery to a new peer.
+            scope.launch {
+                while (true) {
+                    delay(RETRY_SCAN_INTERVAL_MILLIS)
+                    val peers = transport.peers.value
+                        .filter { it.status == PeerConnectionStatus.CONNECTED }
+                    if (peers.isEmpty()) {
+                        outboxDao.markExpiredPackets(System.currentTimeMillis())
+                    } else {
+                        for (peer in peers) {
+                            flushOutboxToPeer(peer.endpointId)
+                        }
                     }
                 }
             }
@@ -401,22 +425,30 @@ class MeshRouter(
                 continue
             }
 
-            // 1. Skip if this specific peer was already confirmed as delivered
+            // 1. Skip if this specific peer was already confirmed as delivered.
             if (item.hasDeliveredTo(peerEndpointId)) {
                 continue
             }
 
-            // 2. Skip if peer has already been visited in packet loop trace
-            if (packet.visitedNodeIds.contains(peerEndpointId)) {
+            // Endpoint IDs are transport-local and cannot be compared to stable node IDs in
+            // visitedNodeIds. The receiver checks its own stable node ID before accepting.
+
+            // 2. Retry this packet only after the per-peer ACK timeout has elapsed.
+            val lastAttemptAt = item.lastAttemptAtFor(peerEndpointId)
+            if (lastAttemptAt > 0L && now - lastAttemptAt < PEER_RETRY_INTERVAL_MILLIS) {
                 continue
             }
 
-            // 3. Transmit full packet envelope (preserving all hopCount, visitedNodeIds, and TTL)
+            // Persist attempt before sending so a missing ACK or transient failure is retried
+            // with a delay. The transaction preserves a concurrently received ACK.
+            outboxDao.recordPeerRelayAttempt(item.packetId, peerEndpointId, now)
+
+            // 3. Transmit full packet envelope (preserving hopCount, visitedNodeIds, and TTL).
             val res = transport?.sendMeshPayload(peerEndpointId, item.rawJson)
                 ?: transport?.sendMeshEvent(peerEndpointId, packet.event)
 
             if (res?.isSuccess == true) {
-                // Record provisional relay attempt. When application ACK returns, confirmed delivery is recorded.
+                // Successful transmission metric. Delivery is confirmed only by a signed ACK.
                 outboxDao.markRelayed(item.packetId, now)
                 relayedCount++
                 _stats.update { it.copy(packetsRelayed = it.packetsRelayed + 1) }
