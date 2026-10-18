@@ -341,7 +341,7 @@ class MeshRouter(
             return
         }
 
-        log("هویت رمزنگاری‌شدهٔ همتای $fromEndpointId تأیید شد (\u0024{response.senderNodeId.take(12)}…).")
+        log("هویت رمزنگاری‌شدهٔ همتای " + fromEndpointId + " تأیید شد (" + response.senderNodeId.take(12) + "…).")
         flushOutboxToPeer(fromEndpointId)
     }
 
