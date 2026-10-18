@@ -598,4 +598,72 @@ class MultiHopStoreAndForwardTest {
         assertEquals(1, router.stats.value.packetsDroppedSignature)
     }
 
+
+    @Test
+    fun testOversizedRelayEnvelopeRejectedBeforeJsonParsing() = runBlocking {
+        val dao = InMemoryDao()
+        val outbox = InMemoryOutboxDao()
+        val router = MeshRouter("node_B", dao, outbox, null, eventAuthenticator = testAuthenticator)
+
+        val result = router.processIncomingPacket(" ".repeat(RelayPacket.MAX_ENVELOPE_BYTES + 1))
+
+        assertTrue(result.isFailure)
+        assertEquals(1, router.stats.value.packetsDroppedMalformedRoute)
+        assertTrue(dao.storedEvents.isEmpty())
+        assertTrue(outbox.outbox.isEmpty())
+    }
+
+    @Test
+    fun testInvalidEventTextLengthRejectedBeforePersistence() = runBlocking {
+        val dao = InMemoryDao()
+        val outbox = InMemoryOutboxDao()
+        val router = MeshRouter("node_B", dao, outbox, null, eventAuthenticator = testAuthenticator)
+        val tooLong = EventEntity(
+            id = "evt_too_long",
+            localAuthorId = testAuthenticator.localIdentityId(),
+            displayName = "A",
+            createdAt = System.currentTimeMillis(),
+            eventType = EventType.ROOT_THREAD,
+            rootThreadId = "evt_too_long",
+            text = "x".repeat(RelayPacket.MAX_TEXT_CODE_POINTS + 1),
+            publishScope = PublishScope.MESH_PUBLIC
+        )
+        val packet = RelayPacket.fromEvent(tooLong, "node_A", signature = testAuthenticator.sign(tooLong))
+
+        val result = router.processIncomingPacket(packet.toJson())
+
+        assertTrue(result.isFailure)
+        assertNull(dao.getEventById(tooLong.id))
+        assertEquals(1, router.stats.value.packetsDroppedMalformedRoute)
+    }
+
+    @Test
+    fun testDuplicateEventRepairsMissingForwardingQueue() = runBlocking {
+        val dao = InMemoryDao()
+        val outbox = InMemoryOutboxDao()
+        val router = MeshRouter("node_B", dao, outbox, null, eventAuthenticator = testAuthenticator)
+        val event = EventEntity(
+            id = "evt_recovery",
+            localAuthorId = testAuthenticator.localIdentityId(),
+            displayName = "A",
+            createdAt = System.currentTimeMillis(),
+            eventType = EventType.ROOT_THREAD,
+            rootThreadId = "evt_recovery",
+            text = "بازیابی صف پس از توقف ناگهانی",
+            publishScope = PublishScope.MESH_PUBLIC
+        )
+        // Simulate process interruption after event persistence but before the Outbox write.
+        dao.storedEvents[event.id] = event
+        val incoming = RelayPacket.fromEvent(event, "node_A", signature = testAuthenticator.sign(event))
+
+        val result = router.processIncomingPacket(incoming.toJson(), fromEndpointId = "conn_A")
+
+        assertTrue(result.isSuccess)
+        assertEquals(false, result.getOrNull())
+        val nextHop = outbox.getByPacketId("pkt_${event.id}_1")
+        assertNotNull(nextHop)
+        assertTrue(nextHop!!.hasDeliveredTo("conn_A"))
+        assertEquals(1, router.stats.value.packetsDroppedDuplicate)
+    }
+
 }

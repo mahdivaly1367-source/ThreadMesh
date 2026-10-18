@@ -116,6 +116,10 @@ data class RelayPacket(
         const val TYPE = "MESH_RELAY"
         const val DEFAULT_MAX_HOPS = 5
         const val DEFAULT_TTL_MILLIS = 7 * 24 * 60 * 60 * 1000L // 7 days
+        /** Bound memory/CPU work before JSON parsing and signature verification. */
+        const val MAX_ENVELOPE_BYTES = 64 * 1024
+        const val MAX_TEXT_CODE_POINTS = 4000
+        const val MAX_AUTHOR_NAME_CODE_POINTS = 100
 
         fun fromEvent(
             event: EventEntity,
@@ -184,6 +188,28 @@ data class RelayPacket(
                 relayedByNodeId = json.optString("relayedByNodeId", ""),
                 relayedAt = json.optLong("relayedAt", System.currentTimeMillis())
             )
+        }
+    }
+
+    /**
+     * Validate signed event fields before storing or forwarding. The display name and text are
+     * signed too, but size/shape constraints still need explicit checks.
+     */
+    fun hasValidEventMetadata(): Boolean {
+        fun codePoints(value: String): Int =
+            value.codePointCount(0, value.length)
+
+        if (event.id.isBlank() || event.id.length > 128) return false
+        if (event.localAuthorId.isBlank() || event.localAuthorId.length > 128) return false
+        if (event.displayName.isBlank() || codePoints(event.displayName) > MAX_AUTHOR_NAME_CODE_POINTS) return false
+        if (event.text.isBlank() || codePoints(event.text) > MAX_TEXT_CODE_POINTS) return false
+        if (event.rootThreadId.isBlank() || event.rootThreadId.length > 128) return false
+        if (event.parentEventId != null && (event.parentEventId.isBlank() || event.parentEventId.length > 128)) return false
+        if (event.targetEventId != null && (event.targetEventId.isBlank() || event.targetEventId.length > 128)) return false
+        return when (event.eventType) {
+            EventType.ROOT_THREAD -> event.rootThreadId == event.id && event.parentEventId == null
+            EventType.REPLY -> event.parentEventId != null
+            EventType.STANCE_CHANGED -> event.targetEventId != null || event.parentEventId != null
         }
     }
 

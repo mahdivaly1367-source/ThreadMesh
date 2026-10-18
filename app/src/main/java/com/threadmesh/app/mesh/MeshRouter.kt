@@ -129,6 +129,13 @@ class MeshRouter(
      * Dispatches an incoming raw string payload (ACK or RELAY packet).
      */
     suspend fun handleIncomingPayload(rawJson: String, fromEndpointId: String = "") {
+        // Refuse oversized frames before feeding JSON parsers (covers relay envelopes and ACKs).
+        if (rawJson.toByteArray(Charsets.UTF_8).size > RelayPacket.MAX_ENVELOPE_BYTES) {
+            _stats.update { it.copy(packetsDroppedMalformedRoute = it.packetsDroppedMalformedRoute + 1) }
+            log("بستهٔ دریافتی از سقف اندازهٔ مجاز بیشتر بود و رد شد.")
+            return
+        }
+
         // Check if this payload is an ACK
         val ack = AckPacket.fromJson(rawJson)
         if (ack != null) {
@@ -187,6 +194,38 @@ class MeshRouter(
     }
 
     /**
+     * Queue the next hop durably. Do this before acknowledging receipt so the sender is not told
+     * the message has been accepted by this relay until the forwarding responsibility is stored.
+     */
+    private suspend fun queueNextHop(packet: RelayPacket, fromEndpointId: String): Boolean {
+        if (!packet.canForward(localNodeId)) return false
+        val next = packet.nextHop(localNodeId)
+        val outboxItem = OutboxEntity(
+            packetId = next.packetId,
+            eventId = next.event.id,
+            rawJson = next.toJson(),
+            status = OutboxStatus.PENDING,
+            hopCount = next.hopCount,
+            expiresAt = next.expiresAt,
+            deliveredPeerIds = fromEndpointId
+        )
+        val inserted = outboxDao.insertOutboxItem(outboxItem)
+        if (inserted >= 0L) {
+            log("بستهٔ پرش بعدی در صف پایدار ثبت شد (${next.hopCount}/${next.maxHops}).")
+        }
+        return inserted >= 0L
+    }
+
+    private suspend fun flushOtherConnectedPeers(exceptEndpointId: String) {
+        val peers = transport?.peers?.value
+            ?.filter { it.status == PeerConnectionStatus.CONNECTED && it.endpointId != exceptEndpointId }
+            .orEmpty()
+        for (peer in peers) {
+            flushOutboxToPeer(peer.endpointId)
+        }
+    }
+
+    /**
      * Processes an incoming RelayPacket received from another mesh peer.
      * Implements full multi-hop validation:
      * 1. Scope check (rejects non-MESH_PUBLIC)
@@ -200,6 +239,11 @@ class MeshRouter(
     suspend fun processIncomingPacket(rawJson: String, fromEndpointId: String = ""): Result<Boolean> {
         _stats.update { it.copy(packetsReceived = it.packetsReceived + 1) }
 
+        if (rawJson.toByteArray(Charsets.UTF_8).size > RelayPacket.MAX_ENVELOPE_BYTES) {
+            _stats.update { it.copy(packetsDroppedMalformedRoute = it.packetsDroppedMalformedRoute + 1) }
+            return Result.failure(IllegalArgumentException("بسته از سقف اندازهٔ مجاز بیشتر است."))
+        }
+
         val packet: RelayPacket = try {
             RelayPacket.fromJson(rawJson)
         } catch (e: Exception) {
@@ -208,6 +252,13 @@ class MeshRouter(
         }
 
         val event = packet.event
+
+        // Bound decoded fields before cryptographic verification, database writes, or relay.
+        if (!packet.hasValidEventMetadata()) {
+            _stats.update { it.copy(packetsDroppedMalformedRoute = it.packetsDroppedMalformedRoute + 1) }
+            log("بسته دارای فیلدهای محتوایی نامعتبر یا بیش از حد مجاز است.")
+            return Result.failure(IllegalArgumentException("فرادادهٔ محتوایی رویداد نامعتبر است."))
+        }
 
         // 1. Scope check
         if (event.publishScope != PublishScope.MESH_PUBLIC) {
@@ -250,8 +301,12 @@ class MeshRouter(
         if (existingLocal != null) {
             _stats.update { it.copy(packetsDroppedDuplicate = it.packetsDroppedDuplicate + 1) }
             log("رویداد تکراری: رویداد ${event.id.take(8)} قبلاً در دیتابیس محلی ذخیره شده است.")
-            
-            // Send ACK back so sender knows we already have it
+
+            // Crash recovery: an event row may have been committed just before an earlier process
+            // death prevented the associated forwarding row from being written.
+            val queued = queueNextHop(packet, fromEndpointId)
+            if (queued) flushOtherConnectedPeers(fromEndpointId)
+
             sendAck(fromEndpointId, packet.packetId, event.id, AckPacket.STATUS_DUPLICATE)
             return Result.success(false)
         }
@@ -272,34 +327,14 @@ class MeshRouter(
         _stats.update { it.copy(packetsStoredLocally = it.packetsStoredLocally + 1) }
         log("پیام [${event.displayName}]: «${event.text.take(30)}...» با پرش ${packet.hopCount} در پایگاه محلی ذخیره شد.")
 
-        // 6. Send application-level confirmation ACK back to transmitting peer
+        // Persist forwarding responsibility before acknowledging durable receipt.
+        val queuedForNextHop = queueNextHop(packet, fromEndpointId)
         sendAck(fromEndpointId, packet.packetId, event.id, AckPacket.STATUS_STORED)
 
-        // 7. Store-and-Forward: can this packet hop further?
-        if (packet.canForward(localNodeId)) {
-            val nextHopPacket = packet.nextHop(localNodeId)
-            val outboxItem = OutboxEntity(
-                packetId = nextHopPacket.packetId,
-                eventId = event.id,
-                rawJson = nextHopPacket.toJson(),
-                status = OutboxStatus.PENDING,
-                hopCount = nextHopPacket.hopCount,
-                expiresAt = nextHopPacket.expiresAt,
-                deliveredPeerIds = if (fromEndpointId.isNotBlank()) fromEndpointId else ""
-            )
-            outboxDao.insertOutboxItem(outboxItem)
-            log("بسته برای بازنشر به گره‌های بعدی در صف Outbox ذخیره شد (پرش بعدی: ${nextHopPacket.hopCount} از ${nextHopPacket.maxHops}).")
-
-            // Attempt relay to currently connected peers (excluding sender)
-            transport?.let { tp ->
-                val otherPeers = tp.peers.value
-                    .filter { it.status == PeerConnectionStatus.CONNECTED && it.endpointId != fromEndpointId }
-                for (p in otherPeers) {
-                    flushOutboxToPeer(p.endpointId)
-                }
-            }
+        if (queuedForNextHop) {
+            flushOtherConnectedPeers(fromEndpointId)
         } else {
-            log("بسته به سقف پرش مجاز (${packet.hopCount}/${packet.maxHops}) رسید و دیگر رله نمی‌شود.")
+            log("بسته به سقف پرش مجاز (${packet.hopCount}/${packet.maxHops}) رسید یا از قبل در صف ثبت شده بود.")
         }
 
         return Result.success(true)

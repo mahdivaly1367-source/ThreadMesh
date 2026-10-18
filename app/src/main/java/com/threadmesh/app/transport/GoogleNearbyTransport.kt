@@ -6,6 +6,7 @@ import com.google.android.gms.nearby.connection.*
 import com.threadmesh.app.data.model.EventEntity
 import com.threadmesh.app.data.model.EventType
 import com.threadmesh.app.data.model.PublishScope
+import com.threadmesh.app.data.model.RelayPacket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
@@ -117,6 +118,10 @@ class GoogleNearbyTransport(
         override fun onPayloadReceived(endpointId: String, payload: Payload) {
             if (payload.type != Payload.Type.BYTES) return
             val bytes = payload.asBytes() ?: return
+            if (bytes.size > RelayPacket.MAX_ENVELOPE_BYTES) {
+                _lastError.value = "بستهٔ دریافتی از سقف اندازهٔ ۶۴ کیلوبایت بیشتر بود و رد شد."
+                return
+            }
             try {
                 val jsonString = String(bytes, StandardCharsets.UTF_8)
                 
