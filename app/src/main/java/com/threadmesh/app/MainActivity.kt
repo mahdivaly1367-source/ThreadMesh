@@ -68,7 +68,8 @@ class MainActivity : ComponentActivity() {
                     transport = transport,
                     threadMeshDao = database.threadMeshDao(),
                     outboxDao = database.outboxDao(),
-                    initialLocalAuthorId = localNodeId,
+                    initialLocalAuthorId = eventAuthenticator.localIdentityId(),
+                    initialLocalNodeId = localNodeId,
                     eventAuthenticator = eventAuthenticator
                 ) as T
             }

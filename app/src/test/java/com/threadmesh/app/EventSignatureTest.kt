@@ -34,6 +34,8 @@ class EventSignatureTest {
             )
         }
 
+        override fun localIdentityId(): String = EventSignatureCodec.keyId(pair.public.encoded)
+
         override fun verify(event: EventEntity, signature: EventSignature?): Boolean =
             EventSignatureCodec.verify(event, signature)
     }
@@ -42,7 +44,7 @@ class EventSignatureTest {
 
     private fun event(text: String = "متن امضاشده") = EventEntity(
         id = "evt-sec-1",
-        localAuthorId = "author-1",
+        localAuthorId = authenticator.localIdentityId(),
         displayName = "کاربر",
         createdAt = 1_800_000_000_000L,
         eventType = EventType.ROOT_THREAD,

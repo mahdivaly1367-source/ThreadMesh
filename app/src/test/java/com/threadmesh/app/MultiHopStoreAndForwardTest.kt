@@ -58,6 +58,8 @@ class MultiHopStoreAndForwardTest {
             )
         }
 
+        override fun localIdentityId(): String = EventSignatureCodec.keyId(pair.public.encoded)
+
         override fun verify(event: EventEntity, signature: EventSignature?): Boolean =
             EventSignatureCodec.verify(event, signature)
     }
@@ -187,7 +189,7 @@ class MultiHopStoreAndForwardTest {
         // Event originated by Node A
         val eventA = EventEntity(
             id = "evt_A_101",
-            localAuthorId = "node_A",
+            localAuthorId = testAuthenticator.localIdentityId(),
             displayName = "گوشی A",
             createdAt = System.currentTimeMillis(),
             eventType = EventType.ROOT_THREAD,
@@ -210,7 +212,7 @@ class MultiHopStoreAndForwardTest {
         val storedInB = daoB.getEventById("evt_A_101")
         assertNotNull(storedInB)
         assertEquals(eventA.text, storedInB?.text)
-        assertEquals("node_A", storedInB?.localAuthorId)
+        assertEquals(testAuthenticator.localIdentityId(), storedInB?.localAuthorId)
 
         // 2. Check Node B queued packet in Outbox with hopCount = 1 and added node_B to visited
         val pendingInB = outboxB.getPendingPackets()
@@ -232,7 +234,7 @@ class MultiHopStoreAndForwardTest {
         val storedInC = daoC.getEventById("evt_A_101")
         assertNotNull(storedInC)
         assertEquals(eventA.text, storedInC?.text)
-        assertEquals("node_A", storedInC?.localAuthorId)
+        assertEquals(testAuthenticator.localIdentityId(), storedInC?.localAuthorId)
     }
 
     @Test
@@ -245,7 +247,7 @@ class MultiHopStoreAndForwardTest {
 
         val event = EventEntity(
             id = "evt_spread_1",
-            localAuthorId = "node_B",
+            localAuthorId = testAuthenticator.localIdentityId(),
             displayName = "گوشی B",
             createdAt = System.currentTimeMillis(),
             eventType = EventType.ROOT_THREAD,
@@ -288,7 +290,7 @@ class MultiHopStoreAndForwardTest {
 
         val event = EventEntity(
             id = "evt_ack_test",
-            localAuthorId = "node_A",
+            localAuthorId = testAuthenticator.localIdentityId(),
             displayName = "گوشی A",
             createdAt = System.currentTimeMillis(),
             eventType = EventType.ROOT_THREAD,
@@ -345,7 +347,7 @@ class MultiHopStoreAndForwardTest {
 
         val event = EventEntity(
             id = "evt_loop_1",
-            localAuthorId = "node_A",
+            localAuthorId = testAuthenticator.localIdentityId(),
             displayName = "گوشی A",
             createdAt = System.currentTimeMillis(),
             eventType = EventType.ROOT_THREAD,
@@ -379,7 +381,7 @@ class MultiHopStoreAndForwardTest {
 
         val event = EventEntity(
             id = "evt_max_hops",
-            localAuthorId = "node_A",
+            localAuthorId = testAuthenticator.localIdentityId(),
             displayName = "A",
             createdAt = System.currentTimeMillis(),
             eventType = EventType.ROOT_THREAD,
@@ -414,7 +416,7 @@ class MultiHopStoreAndForwardTest {
 
         val staleEvent = EventEntity(
             id = "evt_stale",
-            localAuthorId = "node_A",
+            localAuthorId = testAuthenticator.localIdentityId(),
             displayName = "A",
             createdAt = System.currentTimeMillis() - 100000,
             eventType = EventType.ROOT_THREAD,
@@ -448,7 +450,7 @@ class MultiHopStoreAndForwardTest {
 
         val localOnlyEvent = EventEntity(
             id = "evt_local",
-            localAuthorId = "node_A",
+            localAuthorId = testAuthenticator.localIdentityId(),
             displayName = "A",
             createdAt = System.currentTimeMillis(),
             eventType = EventType.ROOT_THREAD,

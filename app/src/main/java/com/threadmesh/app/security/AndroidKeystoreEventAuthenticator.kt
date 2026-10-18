@@ -31,6 +31,8 @@ class AndroidKeystoreEventAuthenticator : EventAuthenticator {
         )
     }
 
+    override fun localIdentityId(): String = EventSignatureCodec.keyId(loadOrCreateKeyPair().public.encoded)
+
     override fun verify(event: EventEntity, signature: EventSignature?): Boolean =
         EventSignatureCodec.verify(event, signature)
 

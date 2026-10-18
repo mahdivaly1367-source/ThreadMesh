@@ -28,6 +28,7 @@ class ThreadMeshViewModel(
     threadMeshDao: ThreadMeshDao? = null,
     outboxDao: OutboxDao? = null,
     initialLocalAuthorId: String? = null,
+    initialLocalNodeId: String? = null,
     eventAuthenticator: EventAuthenticator? = null
 ) : ViewModel() {
 
@@ -39,7 +40,7 @@ class ThreadMeshViewModel(
     // The router belongs to the ViewModel lifecycle and shares the same stable identity as local posts.
     private val meshRouter: MeshRouter? = if (threadMeshDao != null && outboxDao != null) {
         MeshRouter(
-            localNodeId = _localAuthorId.value,
+            localNodeId = initialLocalNodeId?.takeIf { it.isNotBlank() } ?: _localAuthorId.value,
             eventDao = threadMeshDao,
             outboxDao = outboxDao,
             transport = transport,
